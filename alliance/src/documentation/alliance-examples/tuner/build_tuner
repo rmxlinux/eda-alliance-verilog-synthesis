@@ -1,0 +1,169 @@
+#######################################
+#Author: Frédéric Pétrot
+#Unlike most of the work I've done in Alliance, this very example
+#is bilingual
+#It was done for educational purpose at the well
+#known École Polytechnique, and therefore written in French
+#I rapidly translated the content to english in case it could
+#be useful to someone
+###########################################################
+
+#Construit le projet complet
+#Building the entire project.
+
+ if [ -z "$ALLIANCE_TOP" ]; then
+   alcEnv="/etc/profile.d/alc_env.sh"
+
+   if [ ! -x "${alcEnv}" ]; then
+     ALLIANCE_TOP="${HOME}/alliance/Linux.slsoc6x/install"
+
+     alcEnv="${ALLIANCE_TOP}/etc/profile.d/alc_env.sh"
+     if [ ! -f "${alcEnv}" ]; then
+       alcEnv="${ALLIANCE_TOP}/etc/alc_env.sh"
+     else
+       echo "[ERROR] Cannot find alc_env.sh."
+       exit 1
+     fi
+   fi
+   . ${alcEnv}
+ fi
+
+
+export MBK_IN_LO=vst
+export MBK_OUT_LO=vst
+
+#Utilisez cet artefact pour commenter une partie du source
+#Use this artifact to comment out part of this code, since
+#I didn't want to use a Makefile for simplicity
+#You ought to in real projects, however :)
+if [ "x" = "y" ] ; then
+echo -n ""
+fi
+
+#Simulation du comportement
+#Simulate the behavior with simple patterns
+genpat core
+asimut -b tuner core result > /dev/null
+
+#Optimisation combinatoire
+#Multilevel boolean optimization
+boom -V -s tuner tuner_o
+
+#Vérification que le comportement optimisé est
+#identique au comportement initial
+#Check by simulation that the initial behaviour is identical to the
+#optimized one
+asimut -b tuner_o core result > /dev/null
+
+#Vérification formelle de l'équivalence de deux comportements
+#Formal verification of the équivalence of two sets of boolean
+#equations and registers
+proof tuner_o tuner
+
+#Projection structurelle sur la bibliotheque standard
+#Mapping of the behavior on the standard cell library
+#export MBK_TARGET_LIB=$CELLS_TOP/sxlib
+boog -m 0 tuner_o tuner_x
+
+#Adaptation de la puissance des portes à leur charge
+#Gate sizing to adapt the fanout
+loon -x 0 -m 0 tuner_x tuner_o
+
+#Vous pouvez lancer xsch pour voir l'allure de l'ensemble de portes
+#Ce n'est pas très utile, mais ca rassure !
+#You may launch xsch to see the way your netlist looks
+#Not really usefully but sometime pretty.
+xsch -l tuner_o
+
+#Vérification que l'interconnexion de portes logiques est
+#identique au comportement initial
+#Check by simulation that the gate netlist bahaves as the
+#initial behaviour 
+asimut -zd tuner_o core result > /dev/null
+
+#Reconstruit un comportement à partir des feuilles de la netlist
+#Build a behavior by inserting the gate behavior into the netlist
+flatbeh tuner_o tuner_f
+
+#Vérification formelle de l'équivalence de deux comportements
+#Formal verification of the équivalence of two sets of boolean
+#equations
+proof tuner_f tuner
+
+#Placement des cellules avec position des connecteurs imposée
+#Cell placement with forced I/O pin positions
+ocp -v -mdl 10 -ring -ioc tuner tuner_o tuner_p
+
+#Routage des cellules avec 3 niveaux de metal
+#Route the block with 3 levels of metal
+nero -V -3 -p tuner_p tuner_o tuner_o
+
+#Visualisation du circuit après placement/routage des cellules
+#Look at the circuit after place and route
+graal -l tuner_o
+
+#Vérification que les règles de dessins symboliques n'ont pas
+#été violées par le routeur
+#Design rule checking to make sure the router did follow them
+druc tuner_o
+
+#Extraction de l'interconnexion de portes à partir des fils
+#tirés par le routeur
+#Extract the gate netlist after routing
+cougar -f tuner_o tuner_x
+
+#Vérification que les 2 interconnexions de portes sont isomorphes
+#Check that the extracted graph is isomorphic to the initial one
+lvx vst vst tuner_o tuner_x
+
+#Ajout logique des plots d'entrées/sortie
+#Adding the I/O pads
+genlib tuner_io.c
+
+#Génération des vecteurs de tests pour le circuit complet
+#Produces (very few) test vectors for the whole circuit
+genpat circuit
+
+#Verification du circuit complet avec plots
+#Check that inserting the pads was done correctly
+asimut -zd tuner circuit result > /dev/null
+
+#Routage du core et des plots
+#Core to pad routing
+ring tuner circuit
+
+#Visualisation du circuit après routage du core et des plots
+#Look a the circuit
+graal -l circuit
+
+#Vérification que les règles de dessins symboliques n'ont pas
+#été violées par le routeur
+#Design rule checking to make sure the router didn't fool up with
+#layers
+druc circuit
+
+#Verification du travail de ring
+#Extraction de la netlist plots/core
+#Check was ring has done
+#Extract the core to pad routing
+cougar circuit
+
+#Isomorphisme des graphes résultant
+#Check for netlist isomorphism
+lvx vst vst tuner circuit
+
+#Transformation vers la pseudo-technologie
+#Nous utilisons une pseudo technologie 0.5 micron 
+#Adapt the symbolic layout to the target technology
+#We use a fake 0.5 micron technology
+export RDS_IN=cif
+export RDS_OUT=cif
+export RDS_TECHNO_NAME=./fake05.rds
+export DREAL_TECHNO_NAME=./fake05.dreal
+s2r -v circuit
+
+#Visualisation du resultat
+#And give it a look
+dreal -l circuit
+
+#Now, check the layout with your foundry DRC, ...

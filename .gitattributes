@@ -1,0 +1,14 @@
+# Keep this old Unix-oriented source tree stable across Windows checkouts.
+* text=auto eol=lf
+
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.mp4 binary
+*.exe binary
+

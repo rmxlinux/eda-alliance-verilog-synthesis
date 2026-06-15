@@ -1,0 +1,28 @@
+# Local installation packages, videos, and teaching materials.
+Alliance 安装指导/
+
+# Autotools and compiler outputs.
+aclocal.m4
+autom4te.cache/
+config.log
+config.status
+configure
+libtool
+stamp-h*
+.deps/
+.libs/
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.dll
+*.dylib
+
+# Local editor and OS files.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
