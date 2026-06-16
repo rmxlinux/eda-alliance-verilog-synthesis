@@ -29,6 +29,7 @@ enum {
   TOK_DEFAULT,
   TOK_POSEDGE,
   TOK_NEGEDGE,
+  TOK_OR,
   TOK_OROR,
   TOK_ANDAND,
   TOK_EQEQ,
@@ -58,6 +59,8 @@ typedef struct Parser {
   char *error;
   unsigned int error_size;
   int failed;
+  int allow_nonblocking;
+  int hold_missing;
 } Parser;
 
 typedef enum ProcStmtKind {
@@ -278,6 +281,7 @@ static int keyword_type(const char *text)
   if (strcmp(text, "default") == 0) return TOK_DEFAULT;
   if (strcmp(text, "posedge") == 0) return TOK_POSEDGE;
   if (strcmp(text, "negedge") == 0) return TOK_NEGEDGE;
+  if (strcmp(text, "or") == 0) return TOK_OR;
   return TOK_IDENT;
 }
 
@@ -990,13 +994,21 @@ static ProcStmt *parse_proc_assignment(Parser *parser)
   }
 
   if (parser_accept(parser, TOK_LE)) {
+    if (parser->allow_nonblocking) {
+      /* In this front-end both blocking and nonblocking procedural
+       * assignments lower to a next-state expression for the supported
+       * one-edge templates. */
+    } else {
     parser_error_at(parser,
                     line,
-                    "nonblocking assignments are planned for the sequential milestone");
+                    "nonblocking assignments are only supported in edge-triggered always blocks");
     proc_stmt_free(stmt);
     return NULL;
-  }
-  if (!parser_expect(parser, '=', "'=' in procedural assignment")) {
+    }
+  } else if (parser_accept(parser, '=')) {
+    /* blocking assignment */
+  } else {
+    parser_error(parser, "expected '=' or '<=' in procedural assignment");
     proc_stmt_free(stmt);
     return NULL;
   }
@@ -1206,6 +1218,14 @@ static int lower_proc_stmt(Parser *parser,
                            ProcEnv **env,
                            NameList **assigned);
 
+static VlogExpr *make_self_ref_expr(const char *name, int line)
+{
+  VlogRef ref;
+
+  ref = vlog_ref_make(name);
+  return vlog_expr_ref(ref, line);
+}
+
 static int lower_proc_block(Parser *parser,
                             ProcStmt *stmt,
                             ProcEnv **env,
@@ -1270,6 +1290,14 @@ static int lower_proc_if(Parser *parser,
 
     then_expr = proc_env_get(then_env, target->name);
     else_expr = proc_env_get(else_env, target->name);
+    if (then_expr == NULL && parser->hold_missing) {
+      then_expr = make_self_ref_expr(target->name, stmt->line);
+      proc_env_set_take(&then_env, target->name, then_expr);
+    }
+    if (else_expr == NULL && parser->hold_missing) {
+      else_expr = make_self_ref_expr(target->name, stmt->line);
+      proc_env_set_take(&else_env, target->name, else_expr);
+    }
     if (then_expr == NULL || else_expr == NULL) {
       parser_error_at(parser,
                       stmt->line,
@@ -1443,6 +1471,10 @@ static int lower_proc_case(Parser *parser,
     VlogExpr *combined;
 
     base = proc_env_get(default_env, target->name);
+    if (base == NULL && parser->hold_missing) {
+      base = make_self_ref_expr(target->name, stmt->line);
+      proc_env_set_take(&default_env, target->name, base);
+    }
     if (base == NULL) {
       parser_error_at(parser,
                       stmt->line,
@@ -1507,6 +1539,281 @@ static int lower_proc_stmt(Parser *parser,
   return 0;
 }
 
+typedef struct SensitivityInfo {
+  char *clock;
+  int clock_posedge;
+  char *reset;
+  int reset_posedge;
+  int has_reset;
+} SensitivityInfo;
+
+static void sensitivity_init(SensitivityInfo *sens)
+{
+  sens->clock = NULL;
+  sens->clock_posedge = 1;
+  sens->reset = NULL;
+  sens->reset_posedge = 1;
+  sens->has_reset = 0;
+}
+
+static void sensitivity_free(SensitivityInfo *sens)
+{
+  free(sens->clock);
+  free(sens->reset);
+  sensitivity_init(sens);
+}
+
+static int parse_edge_item(Parser *parser, char **name, int *posedge)
+{
+  char *edge_name;
+
+  if (parser_accept(parser, TOK_POSEDGE)) {
+    *posedge = 1;
+  } else if (parser_accept(parser, TOK_NEGEDGE)) {
+    *posedge = 0;
+  } else {
+    parser_error(parser, "expected posedge or negedge in sequential sensitivity list");
+    return 0;
+  }
+
+  edge_name = parse_identifier(parser, "edge signal name");
+  if (edge_name == NULL) {
+    return 0;
+  }
+  *name = edge_name;
+  return 1;
+}
+
+static int parse_sequential_sensitivity(Parser *parser, SensitivityInfo *sens)
+{
+  if (!parse_edge_item(parser, &sens->clock, &sens->clock_posedge)) {
+    return 0;
+  }
+
+  while (parser_accept(parser, TOK_OR) || parser_accept(parser, ',')) {
+    char *name;
+    int posedge;
+
+    name = NULL;
+    posedge = 1;
+    if (!parse_edge_item(parser, &name, &posedge)) {
+      free(name);
+      return 0;
+    }
+    if (sens->has_reset) {
+      free(name);
+      parser_error(parser, "only one asynchronous reset signal is supported");
+      return 0;
+    }
+    sens->reset = name;
+    sens->reset_posedge = posedge;
+    sens->has_reset = 1;
+  }
+  return 1;
+}
+
+static int expr_is_ref_name(const VlogExpr *expr, const char *name)
+{
+  return expr != NULL &&
+         expr->kind == VLOG_EXPR_REF &&
+         expr->ref.name != NULL &&
+         !expr->ref.has_select &&
+         strcmp(expr->ref.name, name) == 0;
+}
+
+static int expr_is_active_reset(const VlogExpr *expr, const char *name, int active_high)
+{
+  if (active_high) {
+    return expr_is_ref_name(expr, name);
+  }
+
+  return expr != NULL &&
+         expr->kind == VLOG_EXPR_UNARY &&
+         expr->op == VLOG_OP_NOT &&
+         expr_is_ref_name(expr->left, name);
+}
+
+static void add_clock_driver(Parser *parser,
+                             const SensitivityInfo *sens,
+                             const char *target,
+                             VlogExpr *guard,
+                             VlogExpr *expr,
+                             int line)
+{
+  VlogRef ref;
+
+  ref = vlog_ref_make(target);
+  vlog_module_add_reg_driver(parser->module,
+                             ref,
+                             sens->clock,
+                             sens->clock_posedge,
+                             guard,
+                             expr,
+                             line);
+}
+
+static void add_level_driver(Parser *parser,
+                             const char *target,
+                             VlogExpr *guard,
+                             VlogExpr *expr,
+                             int line)
+{
+  VlogRef ref;
+
+  ref = vlog_ref_make(target);
+  vlog_module_add_reg_driver(parser->module,
+                             ref,
+                             NULL,
+                             1,
+                             guard,
+                             expr,
+                             line);
+}
+
+static int lower_seq_regular(Parser *parser,
+                             const SensitivityInfo *sens,
+                             ProcStmt *stmt,
+                             int line)
+{
+  ProcEnv *env;
+  NameList *assigned;
+  ProcEnv *entry;
+  int old_hold;
+
+  env = NULL;
+  assigned = NULL;
+  old_hold = parser->hold_missing;
+  parser->hold_missing = 1;
+
+  if (!lower_proc_stmt(parser, stmt, &env, &assigned)) {
+    parser->hold_missing = old_hold;
+    proc_env_free(env);
+    name_list_free(assigned);
+    return 0;
+  }
+
+  parser->hold_missing = old_hold;
+  for (entry = env; entry != NULL; entry = entry->next) {
+    VlogExpr *expr;
+
+    expr = entry->expr;
+    entry->expr = NULL;
+    add_clock_driver(parser, sens, entry->name, NULL, expr, line);
+  }
+
+  proc_env_free(env);
+  name_list_free(assigned);
+  return 1;
+}
+
+static int lower_seq_async_reset(Parser *parser,
+                                 const SensitivityInfo *sens,
+                                 ProcStmt *stmt,
+                                 int line)
+{
+  ProcEnv *reset_env;
+  ProcEnv *clock_env;
+  NameList *reset_assigned;
+  NameList *clock_assigned;
+  NameList *targets;
+  NameList *target;
+  int old_hold;
+
+  if (stmt->kind == PROC_STMT_BLOCK &&
+      stmt->stmts != NULL &&
+      stmt->stmts->next == NULL) {
+    stmt = stmt->stmts->stmt;
+  }
+
+  if (stmt->kind != PROC_STMT_IF ||
+      !expr_is_active_reset(stmt->cond, sens->reset, sens->reset_posedge)) {
+    parser_error_at(parser,
+                    line,
+                    "asynchronous reset requires top-level if matching the reset edge");
+    return 0;
+  }
+  if (stmt->else_stmt == NULL) {
+    parser_error_at(parser,
+                    line,
+                    "asynchronous reset template requires an else branch");
+    return 0;
+  }
+
+  reset_env = NULL;
+  clock_env = NULL;
+  reset_assigned = NULL;
+  clock_assigned = NULL;
+  targets = NULL;
+  old_hold = parser->hold_missing;
+
+  parser->hold_missing = 0;
+  if (!lower_proc_stmt(parser, stmt->then_stmt, &reset_env, &reset_assigned)) {
+    parser->hold_missing = old_hold;
+    proc_env_free(reset_env);
+    name_list_free(reset_assigned);
+    return 0;
+  }
+
+  parser->hold_missing = 1;
+  if (!lower_proc_stmt(parser, stmt->else_stmt, &clock_env, &clock_assigned)) {
+    parser->hold_missing = old_hold;
+    proc_env_free(reset_env);
+    proc_env_free(clock_env);
+    name_list_free(reset_assigned);
+    name_list_free(clock_assigned);
+    return 0;
+  }
+  parser->hold_missing = old_hold;
+
+  name_list_merge(&targets, reset_assigned);
+  name_list_merge(&targets, clock_assigned);
+
+  for (target = targets; target != NULL; target = target->next) {
+    VlogExpr *reset_expr;
+    VlogExpr *clock_expr;
+    VlogExpr *clock_guard;
+
+    reset_expr = proc_env_get(reset_env, target->name);
+    clock_expr = proc_env_get(clock_env, target->name);
+    if (reset_expr == NULL) {
+      parser_error_at(parser,
+                      line,
+                      "reset branch does not assign '%s'",
+                      target->name);
+      proc_env_free(reset_env);
+      proc_env_free(clock_env);
+      name_list_free(reset_assigned);
+      name_list_free(clock_assigned);
+      name_list_free(targets);
+      return 0;
+    }
+    if (clock_expr == NULL) {
+      clock_expr = make_self_ref_expr(target->name, line);
+      proc_env_set_take(&clock_env, target->name, clock_expr);
+    }
+
+    add_level_driver(parser,
+                     target->name,
+                     vlog_expr_clone(stmt->cond),
+                     vlog_expr_clone(reset_expr),
+                     line);
+    clock_guard = vlog_expr_unary(VLOG_OP_NOT, vlog_expr_clone(stmt->cond), line);
+    add_clock_driver(parser,
+                     sens,
+                     target->name,
+                     clock_guard,
+                     vlog_expr_clone(clock_expr),
+                     line);
+  }
+
+  proc_env_free(reset_env);
+  proc_env_free(clock_env);
+  name_list_free(reset_assigned);
+  name_list_free(clock_assigned);
+  name_list_free(targets);
+  return 1;
+}
+
 static int parse_always(Parser *parser)
 {
   ProcStmt *stmt;
@@ -1514,8 +1821,13 @@ static int parse_always(Parser *parser)
   NameList *assigned;
   ProcEnv *entry;
   int line;
+  SensitivityInfo sens;
+  int sequential;
+  int old_allow_nonblocking;
 
   line = parser->lexer.tok.line;
+  sensitivity_init(&sens);
+  sequential = 0;
   if (!parser_expect(parser, TOK_ALWAYS, "'always'")) {
     return 0;
   }
@@ -1532,10 +1844,15 @@ static int parse_always(Parser *parser)
       }
     } else if (parser->lexer.tok.type == TOK_POSEDGE ||
                parser->lexer.tok.type == TOK_NEGEDGE) {
-      parser_error_at(parser,
-                      line,
-                      "edge-triggered always blocks are planned for the sequential milestone");
-      return 0;
+      sequential = 1;
+      if (!parse_sequential_sensitivity(parser, &sens)) {
+        sensitivity_free(&sens);
+        return 0;
+      }
+      if (!parser_expect(parser, ')', "')' after sensitivity list")) {
+        sensitivity_free(&sens);
+        return 0;
+      }
     } else {
       parser_error_at(parser,
                       line,
@@ -1549,9 +1866,26 @@ static int parse_always(Parser *parser)
     return 0;
   }
 
+  old_allow_nonblocking = parser->allow_nonblocking;
+  parser->allow_nonblocking = sequential;
   stmt = parse_proc_stmt(parser);
+  parser->allow_nonblocking = old_allow_nonblocking;
   if (stmt == NULL) {
+    sensitivity_free(&sens);
     return 0;
+  }
+
+  if (sequential) {
+    int ok;
+
+    if (sens.has_reset) {
+      ok = lower_seq_async_reset(parser, &sens, stmt, line);
+    } else {
+      ok = lower_seq_regular(parser, &sens, stmt, line);
+    }
+    sensitivity_free(&sens);
+    proc_stmt_free(stmt);
+    return ok;
   }
 
   env = NULL;

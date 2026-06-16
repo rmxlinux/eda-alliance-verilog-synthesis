@@ -1,0 +1,18 @@
+ENTITY dff_en IS
+PORT(
+  clk : in BIT;
+  en : in BIT;
+  d : in BIT;
+  q : out BIT
+);
+END dff_en;
+
+ARCHITECTURE behavior_data_flow OF dff_en IS
+  SIGNAL q_reg : REG_BIT REGISTER;
+BEGIN
+  label0 : BLOCK ((clk and not (clk'STABLE)) = '1')
+  BEGIN
+    q_reg <= GUARDED ((en and d) or ((not en) and q_reg));
+  END BLOCK label0;
+  q <= q_reg;
+END behavior_data_flow;

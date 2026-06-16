@@ -1,7 +1,9 @@
 VLOG2VBE ?= ../src/vlog2vbe
 GENERATED_DIR = generated
 
-CASES = simple_and mux2 vector_ops always_mux always_default case_decoder
+COMB_CASES = simple_and mux2 vector_ops always_mux always_default case_decoder
+SEQ_CASES = dff dff_en dff_async_reset
+CASES = $(COMB_CASES) $(SEQ_CASES)
 GENERATED = $(addprefix $(GENERATED_DIR)/,$(addsuffix .vbe,$(CASES)))
 
 .PHONY: all check clean
@@ -14,10 +16,16 @@ $(GENERATED_DIR):
 $(GENERATED_DIR)/%.vbe: comb/%.v | $(GENERATED_DIR)
 	$(VLOG2VBE) -o $@ $< $*
 
+$(GENERATED_DIR)/%.vbe: seq/%.v | $(GENERATED_DIR)
+	$(VLOG2VBE) -o $@ $< $*
+
 check: all
 	diff -u expected/simple_and.vbe generated/simple_and.vbe
 	diff -u expected/always_mux.vbe generated/always_mux.vbe
 	diff -u expected/always_default.vbe generated/always_default.vbe
+	diff -u expected/dff.vbe generated/dff.vbe
+	diff -u expected/dff_en.vbe generated/dff_en.vbe
+	diff -u expected/dff_async_reset.vbe generated/dff_async_reset.vbe
 
 clean:
 	rm -rf $(GENERATED_DIR)

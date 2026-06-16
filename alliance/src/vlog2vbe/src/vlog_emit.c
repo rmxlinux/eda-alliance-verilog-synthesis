@@ -130,6 +130,41 @@ static const VlogSignal *find_signal_const(const VlogModule *module, const char 
   return NULL;
 }
 
+static int signal_has_reg_driver(const VlogModule *module, const char *name)
+{
+  const VlogRegDriver *driver;
+
+  for (driver = module->reg_drivers; driver != NULL; driver = driver->next) {
+    if (strcmp(driver->target.name, name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int signal_is_registered_output(const VlogModule *module, const char *name)
+{
+  const VlogSignal *signal;
+
+  signal = find_signal_const(module, name);
+  return signal != NULL &&
+         signal->dir == VLOG_DIR_OUTPUT &&
+         signal_has_reg_driver(module, name);
+}
+
+static char *reg_storage_name(const VlogModule *module, const char *name)
+{
+  StrBuf sb;
+
+  if (!signal_is_registered_output(module, name)) {
+    return vlog_strdup(name);
+  }
+
+  sb_init(&sb);
+  sb_appendf(&sb, "%s_reg", name);
+  return sb_take(&sb);
+}
+
 static const char *dir_to_vbe(VlogDir dir)
 {
   if (dir == VLOG_DIR_INPUT) return "in";
@@ -384,12 +419,31 @@ static char *normalize_number(const char *text, char *error, unsigned int error_
   return fit_width(sb_take(&bits), width);
 }
 
-static char *emit_ref(const VlogRef *ref)
+static char *emit_ref_raw(const VlogRef *ref)
 {
   StrBuf sb;
 
   sb_init(&sb);
   sb_append(&sb, ref->name);
+  if (ref->has_select) {
+    if (ref->select_msb == ref->select_lsb) {
+      sb_appendf(&sb, "(%d)", ref->select_msb);
+    } else {
+      sb_appendf(&sb, "(%d downto %d)", ref->select_msb, ref->select_lsb);
+    }
+  }
+  return sb_take(&sb);
+}
+
+static char *emit_ref(const VlogModule *module, const VlogRef *ref)
+{
+  StrBuf sb;
+  char *name;
+
+  name = reg_storage_name(module, ref->name);
+  sb_init(&sb);
+  sb_append(&sb, name);
+  free(name);
   if (ref->has_select) {
     if (ref->select_msb == ref->select_lsb) {
       sb_appendf(&sb, "(%d)", ref->select_msb);
@@ -700,18 +754,23 @@ static char *emit_ref_bit(const VlogModule *module,
 
   width = ref_width(module, ref);
   if (bit_index >= width) {
-    return vlog_strdup("B\"0\"");
+    return vlog_strdup("'0'");
   }
   if (!ref_bit_number(module, ref, bit_index, &bit_number)) {
     set_error(error, error_size, "cannot select bit %d of '%s'", bit_index, ref->name);
     return NULL;
   }
   if (width == 1 && !ref->has_select) {
-    return emit_ref(ref);
+    return emit_ref(module, ref);
   }
 
   sb_init(&sb);
-  sb_appendf(&sb, "%s(%d)", ref->name, bit_number);
+  {
+    char *name;
+    name = reg_storage_name(module, ref->name);
+    sb_appendf(&sb, "%s(%d)", name, bit_number);
+    free(name);
+  }
   return sb_take(&sb);
 }
 
@@ -723,7 +782,7 @@ static char *emit_const_bit(const VlogExpr *expr,
 {
   char *bits;
   unsigned int len;
-  char text[5];
+  char text[4];
 
   bits = normalize_number(expr->text, error, error_size);
   if (bits == NULL) {
@@ -733,14 +792,13 @@ static char *emit_const_bit(const VlogExpr *expr,
   len = (unsigned int)strlen(bits);
   if (bit_index >= (int)len) {
     free(bits);
-    return vlog_strdup("B\"0\"");
+    return vlog_strdup("'0'");
   }
 
-  text[0] = 'B';
-  text[1] = '"';
-  text[2] = bits[len - 1 - bit_index];
-  text[3] = '"';
-  text[4] = '\0';
+  text[0] = '\'';
+  text[1] = bits[len - 1 - bit_index];
+  text[2] = '\'';
+  text[3] = '\0';
   free(bits);
   return vlog_strdup(text);
 }
@@ -760,7 +818,7 @@ static char *emit_expr_bit(const VlogModule *module,
 
   width = expr_width(module, expr);
   if (bit_index >= width) {
-    return vlog_strdup("B\"0\"");
+    return vlog_strdup("'0'");
   }
 
   if (expr->kind == VLOG_EXPR_REF) {
@@ -780,7 +838,7 @@ static char *emit_expr_bit(const VlogModule *module,
   if (expr->kind == VLOG_EXPR_BINARY) {
     if (expr->op == VLOG_OP_EQ || expr->op == VLOG_OP_NE) {
       if (bit_index != 0) {
-        return vlog_strdup("B\"0\"");
+        return vlog_strdup("'0'");
       }
       return emit_equality_expr(module,
                                 expr->left,
@@ -871,7 +929,7 @@ static char *emit_expr(const VlogModule *module,
   }
 
   if (expr->kind == VLOG_EXPR_REF) {
-    return emit_ref(&expr->ref);
+    return emit_ref(module, &expr->ref);
   }
 
   if (expr->kind == VLOG_EXPR_CONST) {
@@ -879,7 +937,11 @@ static char *emit_expr(const VlogModule *module,
     bits = normalize_number(expr->text, error, error_size);
     if (bits == NULL) return NULL;
     sb_init(&sb);
-    sb_appendf(&sb, "B\"%s\"", bits);
+    if (strlen(bits) == 1) {
+      sb_appendf(&sb, "'%s'", bits);
+    } else {
+      sb_appendf(&sb, "B\"%s\"", bits);
+    }
     free(bits);
     return sb_take(&sb);
   }
@@ -975,6 +1037,225 @@ static char *emit_expr(const VlogModule *module,
   return result;
 }
 
+static int emit_reg_type(FILE *out, VlogRange range)
+{
+  if (range.has_range) {
+    return fprintf(out,
+                   "REG_VECTOR(%d downto %d) REGISTER",
+                   range.msb,
+                   range.lsb) > 0;
+  }
+  return fprintf(out, "REG_BIT REGISTER") > 0;
+}
+
+static char *emit_storage_target(const VlogModule *module, const VlogRef *target)
+{
+  StrBuf sb;
+  char *name;
+
+  name = reg_storage_name(module, target->name);
+  sb_init(&sb);
+  sb_append(&sb, name);
+  free(name);
+  if (target->has_select) {
+    if (target->select_msb == target->select_lsb) {
+      sb_appendf(&sb, "(%d)", target->select_msb);
+    } else {
+      sb_appendf(&sb, "(%d downto %d)", target->select_msb, target->select_lsb);
+    }
+  }
+  return sb_take(&sb);
+}
+
+static char *emit_storage_target_bit(const VlogModule *module,
+                                     const VlogRef *target,
+                                     int bit_index,
+                                     char *error,
+                                     unsigned int error_size)
+{
+  int bit_number;
+  char *name;
+  StrBuf sb;
+
+  if (!ref_bit_number(module, target, bit_index, &bit_number)) {
+    set_error(error,
+              error_size,
+              "cannot select register bit %d of '%s'",
+              bit_index,
+              target->name);
+    return NULL;
+  }
+
+  name = reg_storage_name(module, target->name);
+  sb_init(&sb);
+  sb_appendf(&sb, "%s(%d)", name, bit_number);
+  free(name);
+  return sb_take(&sb);
+}
+
+static char *emit_driver_guard(const VlogModule *module,
+                               const VlogRegDriver *driver,
+                               char *error,
+                               unsigned int error_size)
+{
+  StrBuf sb;
+  char *guard;
+
+  guard = NULL;
+  if (driver->guard != NULL) {
+    guard = emit_condition_expr(module, driver->guard, error, error_size);
+    if (guard == NULL) {
+      return NULL;
+    }
+  }
+
+  sb_init(&sb);
+  if (driver->clock == NULL) {
+    if (guard == NULL) {
+      set_error(error, error_size, "level-sensitive register driver lacks a guard");
+      return NULL;
+    }
+    sb_appendf(&sb, "(%s = '1')", guard);
+    free(guard);
+    return sb_take(&sb);
+  }
+
+  if (driver->clock_posedge) {
+    if (guard != NULL) {
+      sb_appendf(&sb,
+                 "(((%s and not (%s'STABLE)) and %s) = '1')",
+                 driver->clock,
+                 driver->clock,
+                 guard);
+    } else {
+      sb_appendf(&sb,
+                 "((%s and not (%s'STABLE)) = '1')",
+                 driver->clock,
+                 driver->clock);
+    }
+  } else {
+    if (guard != NULL) {
+      sb_appendf(&sb,
+                 "((((not %s) and not (%s'STABLE)) and %s) = '1')",
+                 driver->clock,
+                 driver->clock,
+                 guard);
+    } else {
+      sb_appendf(&sb,
+                 "(((not %s) and not (%s'STABLE)) = '1')",
+                 driver->clock,
+                 driver->clock);
+    }
+  }
+  free(guard);
+  return sb_take(&sb);
+}
+
+static int emit_reg_block(FILE *out,
+                          const VlogModule *module,
+                          const VlogRegDriver *driver,
+                          const char *target,
+                          const char *expr,
+                          int label,
+                          char *error,
+                          unsigned int error_size)
+{
+  char *guard;
+
+  guard = emit_driver_guard(module, driver, error, error_size);
+  if (guard == NULL) {
+    return 0;
+  }
+
+  fprintf(out, "  label%d : BLOCK %s\n", label, guard);
+  fprintf(out, "  BEGIN\n");
+  fprintf(out, "    %s <= GUARDED %s;\n", target, expr);
+  fprintf(out, "  END BLOCK label%d;\n", label);
+  free(guard);
+  return 1;
+}
+
+static int emit_reg_driver(FILE *out,
+                           const VlogModule *module,
+                           const VlogRegDriver *driver,
+                           int *label,
+                           char *error,
+                           unsigned int error_size)
+{
+  const VlogSignal *target_signal;
+  int target_width;
+  char *target;
+  char *expr;
+
+  target_signal = find_signal_const(module, driver->target.name);
+  target_width = driver->target.has_select || target_signal == NULL ?
+    ref_width(module, &driver->target) :
+    range_width(target_signal->range);
+
+  if (!driver->target.has_select &&
+      target_width > 1 &&
+      expr_contains_ternary(driver->expr)) {
+    int i;
+
+    for (i = 0; i < target_width; i++) {
+      target = emit_storage_target_bit(module,
+                                       &driver->target,
+                                       i,
+                                       error,
+                                       error_size);
+      if (target == NULL) {
+        return 0;
+      }
+      expr = emit_expr_bit(module, driver->expr, i, error, error_size);
+      if (expr == NULL) {
+        free(target);
+        return 0;
+      }
+      if (!emit_reg_block(out,
+                          module,
+                          driver,
+                          target,
+                          expr,
+                          *label,
+                          error,
+                          error_size)) {
+        set_error(error, error_size, "cannot emit register guard");
+        free(target);
+        free(expr);
+        return 0;
+      }
+      (*label)++;
+      free(target);
+      free(expr);
+    }
+    return 1;
+  }
+
+  target = emit_storage_target(module, &driver->target);
+  expr = emit_expr(module, driver->expr, error, error_size);
+  if (expr == NULL) {
+    free(target);
+    return 0;
+  }
+  if (!emit_reg_block(out,
+                      module,
+                      driver,
+                      target,
+                      expr,
+                      *label,
+                      error,
+                      error_size)) {
+    set_error(error, error_size, "cannot emit register guard");
+    free(target);
+    free(expr);
+    return 0;
+  }
+  (*label)++;
+  free(target);
+  free(expr);
+  return 1;
+}
+
 static int validate_expr_refs(const VlogModule *module,
                               const VlogExpr *expr,
                               char *error,
@@ -1000,6 +1281,7 @@ static int validate_module(const VlogModule *module, char *error, unsigned int e
   const VlogPort *port;
   const VlogAssign *assign;
   const VlogAssign *other_assign;
+  const VlogRegDriver *driver;
 
   if (module->name == NULL) {
     set_error(error, error_size, "empty module");
@@ -1032,6 +1314,13 @@ static int validate_module(const VlogModule *module, char *error, unsigned int e
     if (!validate_expr_refs(module, assign->expr, error, error_size)) {
       return 0;
     }
+    if (signal_has_reg_driver(module, assign->target.name)) {
+      set_error(error,
+                error_size,
+                "signal '%s' is driven by both combinational and sequential logic",
+                assign->target.name);
+      return 0;
+    }
     for (other_assign = assign->next;
          other_assign != NULL;
          other_assign = other_assign->next) {
@@ -1042,6 +1331,37 @@ static int validate_module(const VlogModule *module, char *error, unsigned int e
                   assign->target.name);
         return 0;
       }
+    }
+  }
+
+  for (driver = module->reg_drivers; driver != NULL; driver = driver->next) {
+    const VlogSignal *signal;
+
+    signal = find_signal_const(module, driver->target.name);
+    if (signal == NULL) {
+      set_error(error,
+                error_size,
+                "register target '%s' is undeclared",
+                driver->target.name);
+      return 0;
+    }
+    if (signal->dir == VLOG_DIR_INPUT) {
+      set_error(error,
+                error_size,
+                "register target '%s' is an input",
+                driver->target.name);
+      return 0;
+    }
+    if (!validate_expr_refs(module, driver->guard, error, error_size) ||
+        !validate_expr_refs(module, driver->expr, error, error_size)) {
+      return 0;
+    }
+    if (driver->clock != NULL && find_signal_const(module, driver->clock) == NULL) {
+      set_error(error,
+                error_size,
+                "clock signal '%s' is undeclared",
+                driver->clock);
+      return 0;
     }
   }
   return 1;
@@ -1090,7 +1410,9 @@ int vlog_emit_vbe_file(const VlogModule *module,
   const VlogPort *port;
   const VlogSignal *signal;
   const VlogAssign *assign;
+  const VlogRegDriver *driver;
   int first;
+  int label;
 
   if (!validate_module(module, error, error_size)) {
     return 0;
@@ -1121,13 +1443,32 @@ int vlog_emit_vbe_file(const VlogModule *module,
 
   fprintf(out, "ARCHITECTURE behavior_data_flow OF %s IS\n", module->name);
   for (signal = module->signals; signal != NULL; signal = signal->next) {
-    if (signal->dir == VLOG_DIR_NONE) {
+    if (signal_has_reg_driver(module, signal->name)) {
+      char *name;
+
+      name = reg_storage_name(module, signal->name);
+      fprintf(out, "  SIGNAL %s : ", name);
+      emit_reg_type(out, signal->range);
+      fprintf(out, ";\n");
+      free(name);
+    }
+  }
+  for (signal = module->signals; signal != NULL; signal = signal->next) {
+    if (signal->dir == VLOG_DIR_NONE && !signal_has_reg_driver(module, signal->name)) {
       fprintf(out, "  SIGNAL %s : ", signal->name);
       emit_type(out, signal->range);
       fprintf(out, ";\n");
     }
   }
   fprintf(out, "BEGIN\n");
+
+  label = 0;
+  for (driver = module->reg_drivers; driver != NULL; driver = driver->next) {
+    if (!emit_reg_driver(out, module, driver, &label, error, error_size)) {
+      fclose(out);
+      return 0;
+    }
+  }
 
   for (assign = module->assigns; assign != NULL; assign = assign->next) {
     char *target;
@@ -1167,7 +1508,7 @@ int vlog_emit_vbe_file(const VlogModule *module,
       continue;
     }
 
-    target = emit_ref(&assign->target);
+    target = emit_ref_raw(&assign->target);
     expr = emit_expr(module, assign->expr, error, error_size);
     if (expr == NULL) {
       free(target);
@@ -1177,6 +1518,16 @@ int vlog_emit_vbe_file(const VlogModule *module,
     fprintf(out, "  %s <= %s;\n", target, expr);
     free(target);
     free(expr);
+  }
+
+  for (signal = module->signals; signal != NULL; signal = signal->next) {
+    if (signal->dir == VLOG_DIR_OUTPUT && signal_has_reg_driver(module, signal->name)) {
+      char *storage;
+
+      storage = reg_storage_name(module, signal->name);
+      fprintf(out, "  %s <= %s;\n", signal->name, storage);
+      free(storage);
+    }
   }
 
   fprintf(out, "END behavior_data_flow;\n");

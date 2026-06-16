@@ -20,12 +20,17 @@ loon simple_and_g simple_and_l
 - continuous assignments, `assign y = expr;`;
 - combinational `always @*` / `always @(*)` with blocking assignments,
   `if/else`, and `case/default`;
+- edge-triggered `always @(posedge clk)` / `always @(negedge clk)` with
+  blocking or nonblocking assignments;
+- one common asynchronous reset template, such as
+  `always @(posedge clk or negedge rst_n) if (!rst_n) q <= 0; else q <= d;`;
 - identifiers, constants, bit-selects, part-selects, concatenation;
 - `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, and `?:`.
 
-This version deliberately rejects edge-triggered `always` blocks, hierarchy,
-parameters, generate blocks, delays, four-state constants containing `x/z`,
-and arithmetic operators.  Those are planned for later milestones.
+This version deliberately rejects hierarchy, parameters, generate blocks,
+delays, multiple asynchronous reset signals in one always block, four-state
+constants containing `x/z`, and arithmetic operators.  Those are planned for
+later milestones.
 
 ## Examples
 

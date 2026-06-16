@@ -49,6 +49,7 @@ void vlog_module_init(VlogModule *module)
   module->signals = NULL;
   module->ports = NULL;
   module->assigns = NULL;
+  module->reg_drivers = NULL;
 }
 
 void vlog_ref_free(VlogRef *ref)
@@ -99,6 +100,21 @@ static void vlog_assign_free(VlogAssign *assign)
   }
 }
 
+static void vlog_reg_driver_free(VlogRegDriver *driver)
+{
+  VlogRegDriver *next;
+
+  while (driver != NULL) {
+    next = driver->next;
+    vlog_ref_free(&driver->target);
+    free(driver->clock);
+    vlog_expr_free(driver->guard);
+    vlog_expr_free(driver->expr);
+    free(driver);
+    driver = next;
+  }
+}
+
 void vlog_module_free(VlogModule *module)
 {
   if (module == NULL) {
@@ -108,6 +124,7 @@ void vlog_module_free(VlogModule *module)
   vlog_signal_free(module->signals);
   vlog_port_free(module->ports);
   vlog_assign_free(module->assigns);
+  vlog_reg_driver_free(module->reg_drivers);
   vlog_module_init(module);
 }
 
@@ -229,6 +246,34 @@ int vlog_module_add_assign(VlogModule *module,
     tail = &(*tail)->next;
   }
   *tail = assign;
+  return 1;
+}
+
+int vlog_module_add_reg_driver(VlogModule *module,
+                               VlogRef target,
+                               const char *clock,
+                               int clock_posedge,
+                               VlogExpr *guard,
+                               VlogExpr *expr,
+                               int line)
+{
+  VlogRegDriver *driver;
+  VlogRegDriver **tail;
+
+  driver = (VlogRegDriver *)vlog_xmalloc(sizeof(VlogRegDriver));
+  driver->target = target;
+  driver->clock = vlog_strdup(clock);
+  driver->clock_posedge = clock_posedge;
+  driver->guard = guard;
+  driver->expr = expr;
+  driver->line = line;
+  driver->next = NULL;
+
+  tail = &module->reg_drivers;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = driver;
   return 1;
 }
 

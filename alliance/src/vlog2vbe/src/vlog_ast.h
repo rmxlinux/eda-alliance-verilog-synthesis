@@ -85,11 +85,22 @@ typedef struct VlogAssign {
   struct VlogAssign *next;
 } VlogAssign;
 
+typedef struct VlogRegDriver {
+  VlogRef target;
+  char *clock;
+  int clock_posedge;
+  VlogExpr *guard;
+  VlogExpr *expr;
+  int line;
+  struct VlogRegDriver *next;
+} VlogRegDriver;
+
 typedef struct VlogModule {
   char *name;
   VlogSignal *signals;
   VlogPort *ports;
   VlogAssign *assigns;
+  VlogRegDriver *reg_drivers;
 } VlogModule;
 
 void vlog_module_init(VlogModule *module);
@@ -109,6 +120,13 @@ int vlog_module_add_assign(VlogModule *module,
                            VlogRef target,
                            VlogExpr *expr,
                            int line);
+int vlog_module_add_reg_driver(VlogModule *module,
+                               VlogRef target,
+                               const char *clock,
+                               int clock_posedge,
+                               VlogExpr *guard,
+                               VlogExpr *expr,
+                               int line);
 
 char *vlog_strdup(const char *text);
 char *vlog_strndup(const char *text, unsigned int length);

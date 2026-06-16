@@ -23,12 +23,14 @@ The first version supports one module per file, ANSI and non-ANSI port
 declarations, scalar and packed vector input/output/inout/wire/reg
 declarations, continuous assignments, combinational always @* / always @(*)
 blocks with blocking assignments, if/else and case/default statements,
+edge-triggered always blocks with blocking or nonblocking assignments, and a
+common single asynchronous reset template,
 constants, bit-selects, part-selects, concatenation, bitwise/logical Boolean
 operators, equality operators, and the conditional operator.
 .PP
-Edge-triggered always blocks, parameters, hierarchy, generate blocks, delays,
-arithmetic, and four-state constants containing x or z are intentionally
-rejected in this version.
+Parameters, hierarchy, generate blocks, delays, arithmetic, multiple
+asynchronous resets in one always block, and four-state constants containing x
+or z are intentionally rejected in this version.
 .SH EXAMPLE
 .nf
 vlog2vbe simple_and.v simple_and
