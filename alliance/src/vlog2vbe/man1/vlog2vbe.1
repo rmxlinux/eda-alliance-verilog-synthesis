@@ -1,0 +1,48 @@
+.TH VLOG2VBE 1 "June 2026" "Alliance" "Alliance User Commands"
+.SH NAME
+vlog2vbe \- translate a synthesizable Verilog subset to Alliance VBE
+.SH SYNOPSIS
+.B vlog2vbe
+[\-o output.vbe] [\-top module] file.v [module]
+.br
+.B vlog2vbe
+\-V
+.SH DESCRIPTION
+.B vlog2vbe
+is a first-stage Verilog input front-end for the Alliance synthesis flow.
+It parses a small synthesizable Verilog subset and writes an Alliance
+behavioral
+.B .vbe
+file that can be processed by existing tools such as
+.BR boom ,
+.BR boog ,
+and
+.BR loon .
+.SH SUPPORTED SUBSET
+The first version supports one module per file, ANSI and non-ANSI port
+declarations, scalar and packed vector input/output/inout/wire/reg
+declarations, continuous assignments, constants, bit-selects, part-selects,
+concatenation, bitwise/logical Boolean operators, equality operators, and the
+conditional operator.
+.PP
+Always blocks, parameters, hierarchy, generate blocks, delays, arithmetic, and
+four-state constants containing x or z are intentionally rejected in this
+version.
+.SH EXAMPLE
+.nf
+vlog2vbe simple_and.v simple_and
+boom simple_and simple_and_o
+boog simple_and_o simple_and_g
+loon simple_and_g simple_and_l
+.fi
+.SH OPTIONS
+.TP
+.B \-o output.vbe
+Write the generated VBE to the selected path.  The default is
+module_name.vbe.
+.TP
+.B \-top module
+Require the parsed module name to match the selected top module.
+.TP
+.B \-V
+Print the tool version.

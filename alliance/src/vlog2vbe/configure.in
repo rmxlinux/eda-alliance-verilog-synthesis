@@ -1,0 +1,17 @@
+dnl
+dnl Minimal Verilog to VBE front-end for Alliance.
+dnl
+AC_INIT(src/vlog_main.c)
+AM_INIT_AUTOMAKE(vlog2vbe, 0.1)
+AC_PROG_INSTALL
+AC_PROG_CC
+AC_HEADER_STDC
+AC_C_CONST
+
+AM_ALLIANCE
+
+AC_OUTPUT([
+Makefile
+src/Makefile
+man1/Makefile
+])
