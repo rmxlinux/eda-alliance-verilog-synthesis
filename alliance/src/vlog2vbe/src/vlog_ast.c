@@ -49,7 +49,48 @@ void vlog_module_init(VlogModule *module)
   module->signals = NULL;
   module->ports = NULL;
   module->assigns = NULL;
+  module->instances = NULL;
   module->reg_drivers = NULL;
+  module->next = NULL;
+}
+
+VlogModule *vlog_module_new(void)
+{
+  VlogModule *module;
+
+  module = (VlogModule *)vlog_xmalloc(sizeof(VlogModule));
+  vlog_module_init(module);
+  return module;
+}
+
+void vlog_design_init(VlogDesign *design)
+{
+  design->modules = NULL;
+}
+
+VlogModule *vlog_design_find_module(const VlogDesign *design, const char *name)
+{
+  VlogModule *module;
+
+  for (module = design->modules; module != NULL; module = module->next) {
+    if (module->name != NULL && strcmp(module->name, name) == 0) {
+      return module;
+    }
+  }
+  return NULL;
+}
+
+int vlog_design_add_module(VlogDesign *design, VlogModule *module)
+{
+  VlogModule **tail;
+
+  tail = &design->modules;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  module->next = NULL;
+  *tail = module;
+  return 1;
 }
 
 void vlog_ref_free(VlogRef *ref)
@@ -100,6 +141,33 @@ static void vlog_assign_free(VlogAssign *assign)
   }
 }
 
+void vlog_conn_free(VlogConn *conn)
+{
+  VlogConn *next;
+
+  while (conn != NULL) {
+    next = conn->next;
+    free(conn->port_name);
+    vlog_expr_free(conn->expr);
+    free(conn);
+    conn = next;
+  }
+}
+
+static void vlog_instance_free(VlogInstance *instance)
+{
+  VlogInstance *next;
+
+  while (instance != NULL) {
+    next = instance->next;
+    free(instance->module_name);
+    free(instance->name);
+    vlog_conn_free(instance->conns);
+    free(instance);
+    instance = next;
+  }
+}
+
 static void vlog_reg_driver_free(VlogRegDriver *driver)
 {
   VlogRegDriver *next;
@@ -124,8 +192,29 @@ void vlog_module_free(VlogModule *module)
   vlog_signal_free(module->signals);
   vlog_port_free(module->ports);
   vlog_assign_free(module->assigns);
+  vlog_instance_free(module->instances);
   vlog_reg_driver_free(module->reg_drivers);
   vlog_module_init(module);
+}
+
+void vlog_design_free(VlogDesign *design)
+{
+  VlogModule *module;
+  VlogModule *next;
+
+  if (design == NULL) {
+    return;
+  }
+
+  module = design->modules;
+  while (module != NULL) {
+    next = module->next;
+    module->next = NULL;
+    vlog_module_free(module);
+    free(module);
+    module = next;
+  }
+  vlog_design_init(design);
 }
 
 VlogSignal *vlog_module_find_signal(VlogModule *module, const char *name)
@@ -246,6 +335,30 @@ int vlog_module_add_assign(VlogModule *module,
     tail = &(*tail)->next;
   }
   *tail = assign;
+  return 1;
+}
+
+int vlog_module_add_instance(VlogModule *module,
+                             const char *module_name,
+                             const char *name,
+                             VlogConn *conns,
+                             int line)
+{
+  VlogInstance *instance;
+  VlogInstance **tail;
+
+  instance = (VlogInstance *)vlog_xmalloc(sizeof(VlogInstance));
+  instance->module_name = vlog_strdup(module_name);
+  instance->name = vlog_strdup(name);
+  instance->conns = conns;
+  instance->line = line;
+  instance->next = NULL;
+
+  tail = &module->instances;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = instance;
   return 1;
 }
 
@@ -388,6 +501,30 @@ VlogExprList *vlog_expr_list_append(VlogExprList *list, VlogExpr *expr)
 
   node = (VlogExprList *)vlog_xmalloc(sizeof(VlogExprList));
   node->expr = expr;
+  node->next = NULL;
+
+  tail = &list;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = node;
+  return list;
+}
+
+VlogConn *vlog_conn_append(VlogConn *list,
+                           const char *port_name,
+                           int is_named,
+                           VlogExpr *expr,
+                           int line)
+{
+  VlogConn *node;
+  VlogConn **tail;
+
+  node = (VlogConn *)vlog_xmalloc(sizeof(VlogConn));
+  node->port_name = vlog_strdup(port_name);
+  node->is_named = is_named;
+  node->expr = expr;
+  node->line = line;
   node->next = NULL;
 
   tail = &list;

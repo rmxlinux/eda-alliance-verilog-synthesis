@@ -1,0 +1,18 @@
+ENTITY top IS
+PORT(
+  a : in BIT;
+  b : in BIT;
+  c : in BIT;
+  d : in BIT;
+  y : out BIT
+);
+END top;
+
+ARCHITECTURE behavior_data_flow OF top IS
+  SIGNAL n1 : BIT;
+  SIGNAL n2 : BIT;
+BEGIN
+  y <= (n1 or n2);
+  n1 <= (a and b);
+  n2 <= (c and d);
+END behavior_data_flow;

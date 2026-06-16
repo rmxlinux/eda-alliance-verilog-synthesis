@@ -1995,6 +1995,153 @@ static int parse_assign(Parser *parser)
   return 1;
 }
 
+static int parse_instance_connections(Parser *parser, VlogConn **conns)
+{
+  int mode;
+
+  *conns = NULL;
+  mode = 0;
+  if (!parser_expect(parser, '(', "'(' after instance name")) {
+    return 0;
+  }
+  if (parser_accept(parser, ')')) {
+    return 1;
+  }
+
+  while (!parser->failed) {
+    VlogExpr *expr;
+    char *port_name;
+    int line;
+
+    expr = NULL;
+    port_name = NULL;
+    line = parser->lexer.tok.line;
+
+    if (parser_accept(parser, '.')) {
+      if (mode == 2) {
+        parser_error_at(parser, line, "cannot mix named and positional port connections");
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      mode = 1;
+      port_name = parse_identifier(parser, "port name in named connection");
+      if (port_name == NULL) {
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      if (!parser_expect(parser, '(', "'(' after named port")) {
+        free(port_name);
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      if (parser->lexer.tok.type != ')') {
+        expr = parse_expr(parser);
+        if (expr == NULL) {
+          free(port_name);
+          vlog_conn_free(*conns);
+          *conns = NULL;
+          return 0;
+        }
+      }
+      if (!parser_expect(parser, ')', "')' after named connection")) {
+        free(port_name);
+        vlog_expr_free(expr);
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      *conns = vlog_conn_append(*conns, port_name, 1, expr, line);
+      free(port_name);
+    } else {
+      if (mode == 1) {
+        parser_error_at(parser, line, "cannot mix named and positional port connections");
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      mode = 2;
+      expr = parse_expr(parser);
+      if (expr == NULL) {
+        vlog_conn_free(*conns);
+        *conns = NULL;
+        return 0;
+      }
+      *conns = vlog_conn_append(*conns, NULL, 0, expr, line);
+    }
+
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    if (parser_expect(parser, ')', "')' after instance connections")) {
+      return 1;
+    }
+    vlog_conn_free(*conns);
+    *conns = NULL;
+    return 0;
+  }
+
+  vlog_conn_free(*conns);
+  *conns = NULL;
+  return 0;
+}
+
+static int parse_instance(Parser *parser)
+{
+  char *module_name;
+  int line;
+
+  line = parser->lexer.tok.line;
+  module_name = parse_identifier(parser, "instantiated module name");
+  if (module_name == NULL) {
+    return 0;
+  }
+
+  if (parser->lexer.tok.type == '#') {
+    parser_error_at(parser,
+                    line,
+                    "parameterized module instances are not supported yet");
+    free(module_name);
+    return 0;
+  }
+
+  while (!parser->failed) {
+    char *instance_name;
+    VlogConn *conns;
+
+    instance_name = parse_identifier(parser, "instance name");
+    if (instance_name == NULL) {
+      free(module_name);
+      return 0;
+    }
+
+    conns = NULL;
+    if (!parse_instance_connections(parser, &conns)) {
+      free(module_name);
+      free(instance_name);
+      return 0;
+    }
+
+    vlog_module_add_instance(parser->module,
+                             module_name,
+                             instance_name,
+                             conns,
+                             line);
+    free(instance_name);
+
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    free(module_name);
+    return parser_expect(parser, ';', "';' after module instance");
+  }
+
+  free(module_name);
+  return 0;
+}
+
 static int parse_module(Parser *parser)
 {
   char *name;
@@ -2022,6 +2169,8 @@ static int parse_module(Parser *parser)
       if (!parse_assign(parser)) return 0;
     } else if (parser->lexer.tok.type == TOK_ALWAYS) {
       if (!parse_always(parser)) return 0;
+    } else if (parser->lexer.tok.type == TOK_IDENT) {
+      if (!parse_instance(parser)) return 0;
     } else {
       parser_error(parser, "unsupported module item");
       return 0;
@@ -2029,10 +2178,6 @@ static int parse_module(Parser *parser)
   }
 
   if (!parser_expect(parser, TOK_ENDMODULE, "'endmodule'")) return 0;
-  if (parser->lexer.tok.type != TOK_EOF) {
-    parser_error(parser, "only one module per file is supported in this version");
-    return 0;
-  }
   return 1;
 }
 
@@ -2073,10 +2218,10 @@ static int read_file(const char *path, char **content, unsigned int *length)
   return 1;
 }
 
-int vlog_parse_file(const char *path,
-                    VlogModule *module,
-                    char *error,
-                    unsigned int error_size)
+int vlog_parse_design_file(const char *path,
+                           VlogDesign *design,
+                           char *error,
+                           unsigned int error_size)
 {
   Parser parser;
   char *content;
@@ -2098,14 +2243,78 @@ int vlog_parse_file(const char *path,
   parser.lexer.tok.text = NULL;
   parser.lexer.tok.line = 1;
   parser.lexer.tok.col = 1;
-  parser.module = module;
+  parser.module = NULL;
   parser.error = error;
   parser.error_size = error_size;
   parser.failed = 0;
 
   lexer_next(&parser.lexer);
-  ok = parse_module(&parser) && !parser.failed;
+  while (!parser.failed && parser.lexer.tok.type != TOK_EOF) {
+    VlogModule *module;
+
+    if (parser.lexer.tok.type != TOK_MODULE) {
+      parser_error(&parser, "expected 'module'");
+      break;
+    }
+
+    module = vlog_module_new();
+    parser.module = module;
+    if (!parse_module(&parser)) {
+      vlog_module_free(module);
+      free(module);
+      break;
+    }
+
+    if (vlog_design_find_module(design, module->name) != NULL) {
+      parser_error_at(&parser,
+                      parser.lexer.tok.line,
+                      "duplicate module '%s'",
+                      module->name);
+      vlog_module_free(module);
+      free(module);
+      break;
+    }
+    vlog_design_add_module(design, module);
+    parser.module = NULL;
+  }
+
+  ok = !parser.failed;
   token_clear(&parser.lexer.tok);
   free(content);
   return ok;
+}
+
+int vlog_parse_file(const char *path,
+                    VlogModule *module,
+                    char *error,
+                    unsigned int error_size)
+{
+  VlogDesign design;
+  VlogModule *only;
+
+  vlog_design_init(&design);
+  if (!vlog_parse_design_file(path, &design, error, error_size)) {
+    vlog_design_free(&design);
+    return 0;
+  }
+
+  only = design.modules;
+  if (only == NULL) {
+    snprintf(error, error_size, "no module found in '%s'", path);
+    vlog_design_free(&design);
+    return 0;
+  }
+  if (only->next != NULL) {
+    snprintf(error,
+             error_size,
+             "file contains multiple modules; use vlog_parse_design_file");
+    vlog_design_free(&design);
+    return 0;
+  }
+
+  *module = *only;
+  module->next = NULL;
+  free(only);
+  design.modules = NULL;
+  return 1;
 }

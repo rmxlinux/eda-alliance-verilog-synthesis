@@ -85,6 +85,22 @@ typedef struct VlogAssign {
   struct VlogAssign *next;
 } VlogAssign;
 
+typedef struct VlogConn {
+  char *port_name;
+  int is_named;
+  VlogExpr *expr;
+  int line;
+  struct VlogConn *next;
+} VlogConn;
+
+typedef struct VlogInstance {
+  char *module_name;
+  char *name;
+  VlogConn *conns;
+  int line;
+  struct VlogInstance *next;
+} VlogInstance;
+
 typedef struct VlogRegDriver {
   VlogRef target;
   char *clock;
@@ -100,11 +116,23 @@ typedef struct VlogModule {
   VlogSignal *signals;
   VlogPort *ports;
   VlogAssign *assigns;
+  VlogInstance *instances;
   VlogRegDriver *reg_drivers;
+  struct VlogModule *next;
 } VlogModule;
+
+typedef struct VlogDesign {
+  VlogModule *modules;
+} VlogDesign;
 
 void vlog_module_init(VlogModule *module);
 void vlog_module_free(VlogModule *module);
+VlogModule *vlog_module_new(void);
+
+void vlog_design_init(VlogDesign *design);
+void vlog_design_free(VlogDesign *design);
+VlogModule *vlog_design_find_module(const VlogDesign *design, const char *name);
+int vlog_design_add_module(VlogDesign *design, VlogModule *module);
 
 VlogRange vlog_range_none(void);
 VlogSignal *vlog_module_find_signal(VlogModule *module, const char *name);
@@ -120,6 +148,11 @@ int vlog_module_add_assign(VlogModule *module,
                            VlogRef target,
                            VlogExpr *expr,
                            int line);
+int vlog_module_add_instance(VlogModule *module,
+                             const char *module_name,
+                             const char *name,
+                             VlogConn *conns,
+                             int line);
 int vlog_module_add_reg_driver(VlogModule *module,
                                VlogRef target,
                                const char *clock,
@@ -145,7 +178,13 @@ VlogExpr *vlog_expr_ternary(VlogExpr *cond,
 VlogExpr *vlog_expr_concat(VlogExprList *items, int line);
 VlogExpr *vlog_expr_clone(const VlogExpr *expr);
 VlogExprList *vlog_expr_list_append(VlogExprList *list, VlogExpr *expr);
+VlogConn *vlog_conn_append(VlogConn *list,
+                           const char *port_name,
+                           int is_named,
+                           VlogExpr *expr,
+                           int line);
 void vlog_expr_free(VlogExpr *expr);
 void vlog_expr_list_free(VlogExprList *list);
+void vlog_conn_free(VlogConn *conn);
 
 #endif

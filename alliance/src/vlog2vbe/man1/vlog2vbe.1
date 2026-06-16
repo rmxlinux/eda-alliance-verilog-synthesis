@@ -19,18 +19,20 @@ file that can be processed by existing tools such as
 and
 .BR loon .
 .SH SUPPORTED SUBSET
-The first version supports one module per file, ANSI and non-ANSI port
+The first version supports one or more modules per file, ANSI and non-ANSI port
 declarations, scalar and packed vector input/output/inout/wire/reg
-declarations, continuous assignments, combinational always @* / always @(*)
-blocks with blocking assignments, if/else and case/default statements,
-edge-triggered always blocks with blocking or nonblocking assignments, and a
-common single asynchronous reset template,
+declarations, continuous assignments, simple module instances with named or
+positional port connections, hierarchy flattening into the selected top module,
+combinational always @* / always @(*) blocks with blocking assignments, if/else
+and case/default statements, edge-triggered always blocks with blocking or
+nonblocking assignments, and a common single asynchronous reset template,
 constants, bit-selects, part-selects, concatenation, bitwise/logical Boolean
 operators, equality operators, and the conditional operator.
 .PP
-Parameters, hierarchy, generate blocks, delays, arithmetic, multiple
-asynchronous resets in one always block, and four-state constants containing x
-or z are intentionally rejected in this version.
+Parameters, generate blocks, delays, arithmetic, multiple asynchronous resets
+in one always block, four-state constants containing x or z, parameterized
+instances, and output ports connected to non-assignable expressions are
+intentionally rejected in this version.
 .SH EXAMPLE
 .nf
 vlog2vbe simple_and.v simple_and
@@ -45,7 +47,9 @@ Write the generated VBE to the selected path.  The default is
 module_name.vbe.
 .TP
 .B \-top module
-Require the parsed module name to match the selected top module.
+Select the top module.  If omitted, a single-module design is used directly;
+for multi-module input, the tool infers the unique module that is not
+instantiated by another module.
 .TP
 .B \-V
 Print the tool version.

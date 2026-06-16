@@ -13,7 +13,7 @@ loon simple_and_g simple_and_l
 
 ## First supported subset
 
-- one Verilog module per file;
+- one or more Verilog modules per file;
 - ANSI and non-ANSI port declarations;
 - `input`, `output`, `inout`, `wire`, and `reg` declarations;
 - scalar and packed vector ranges using decimal bounds, such as `[3:0]`;
@@ -24,13 +24,18 @@ loon simple_and_g simple_and_l
   blocking or nonblocking assignments;
 - one common asynchronous reset template, such as
   `always @(posedge clk or negedge rst_n) if (!rst_n) q <= 0; else q <= d;`;
+- simple module instances using named or positional port connections;
+- hierarchy flattening into the selected top module before VBE emission;
+- top selection with `-top module`, a positional module argument, or automatic
+  inference when exactly one module is not instantiated by another module;
 - identifiers, constants, bit-selects, part-selects, concatenation;
 - `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, and `?:`.
 
-This version deliberately rejects hierarchy, parameters, generate blocks,
-delays, multiple asynchronous reset signals in one always block, four-state
-constants containing `x/z`, and arithmetic operators.  Those are planned for
-later milestones.
+This version deliberately rejects parameters, generate blocks, delays,
+multiple asynchronous reset signals in one always block, four-state constants
+containing `x/z`, arithmetic operators, and complex instance connections such
+as parameter overrides or output ports connected to non-assignable expressions.
+Those are planned for later milestones.
 
 ## Examples
 
@@ -38,6 +43,12 @@ later milestones.
 cd alliance/src/vlog2vbe
 cc -std=c99 -Wall -Wextra -o src/vlog2vbe src/vlog_*.c
 src/vlog2vbe -o tests/expected/simple_and.vbe tests/comb/simple_and.v simple_and
+```
+
+For hierarchical input:
+
+```sh
+src/vlog2vbe -top top -o top.vbe tests/hier/named_two_level.v
 ```
 
 Or, after the tool has been built:

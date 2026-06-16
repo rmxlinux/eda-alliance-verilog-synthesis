@@ -1,4 +1,5 @@
 #include "vlog_ast.h"
+#include "vlog_elab.h"
 #include "vlog_emit.h"
 #include "vlog_parse.h"
 
@@ -35,6 +36,7 @@ int main(int argc, char **argv)
   const char *top_name;
   char *owned_output;
   char error[512];
+  VlogDesign design;
   VlogModule module;
   int i;
 
@@ -83,18 +85,17 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  vlog_design_init(&design);
   vlog_module_init(&module);
-  if (!vlog_parse_file(input_path, &module, error, sizeof(error))) {
+  if (!vlog_parse_design_file(input_path, &design, error, sizeof(error))) {
     fprintf(stderr, "vlog2vbe: parse error in %s: %s\n", input_path, error);
-    vlog_module_free(&module);
+    vlog_design_free(&design);
     return 1;
   }
 
-  if (top_name != NULL && strcmp(top_name, module.name) != 0) {
-    fprintf(stderr,
-            "vlog2vbe: requested top '%s' but file contains module '%s'\n",
-            top_name,
-            module.name);
+  if (!vlog_elaborate_design(&design, top_name, &module, error, sizeof(error))) {
+    fprintf(stderr, "vlog2vbe: elaboration error: %s\n", error);
+    vlog_design_free(&design);
     vlog_module_free(&module);
     return 1;
   }
@@ -103,6 +104,7 @@ int main(int argc, char **argv)
     owned_output = default_output_name(module.name);
     if (owned_output == NULL) {
       fprintf(stderr, "vlog2vbe: out of memory\n");
+      vlog_design_free(&design);
       vlog_module_free(&module);
       return 2;
     }
@@ -112,12 +114,14 @@ int main(int argc, char **argv)
   if (!vlog_emit_vbe_file(&module, output_path, error, sizeof(error))) {
     fprintf(stderr, "vlog2vbe: emit error: %s\n", error);
     free(owned_output);
+    vlog_design_free(&design);
     vlog_module_free(&module);
     return 1;
   }
 
   printf("vlog2vbe: wrote %s\n", output_path);
   free(owned_output);
+  vlog_design_free(&design);
   vlog_module_free(&module);
   return 0;
 }
