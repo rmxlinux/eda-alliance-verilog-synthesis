@@ -6,4 +6,9 @@ EXTRA_DIST = \
 	tests/comb/simple_and.v \
 	tests/comb/mux2.v \
 	tests/comb/vector_ops.v \
-	tests/expected/simple_and.vbe
+	tests/comb/always_mux.v \
+	tests/comb/always_default.v \
+	tests/comb/case_decoder.v \
+	tests/expected/simple_and.vbe \
+	tests/expected/always_mux.vbe \
+	tests/expected/always_default.vbe

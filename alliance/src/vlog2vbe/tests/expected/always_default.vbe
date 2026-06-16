@@ -1,0 +1,13 @@
+ENTITY always_default IS
+PORT(
+  sel : in BIT;
+  a : in BIT;
+  b : in BIT;
+  y : out BIT
+);
+END always_default;
+
+ARCHITECTURE behavior_data_flow OF always_default IS
+BEGIN
+  y <= ((sel and a) or ((not sel) and b));
+END behavior_data_flow;

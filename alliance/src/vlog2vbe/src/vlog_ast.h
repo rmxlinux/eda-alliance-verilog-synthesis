@@ -125,6 +125,7 @@ VlogExpr *vlog_expr_ternary(VlogExpr *cond,
                             VlogExpr *false_expr,
                             int line);
 VlogExpr *vlog_expr_concat(VlogExprList *items, int line);
+VlogExpr *vlog_expr_clone(const VlogExpr *expr);
 VlogExprList *vlog_expr_list_append(VlogExprList *list, VlogExpr *expr);
 void vlog_expr_free(VlogExpr *expr);
 void vlog_expr_list_free(VlogExprList *list);

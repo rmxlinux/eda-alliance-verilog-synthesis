@@ -400,6 +400,184 @@ static char *emit_ref(const VlogRef *ref)
   return sb_take(&sb);
 }
 
+static int range_width(VlogRange range)
+{
+  if (!range.has_range) {
+    return 1;
+  }
+  return range.msb >= range.lsb ?
+    range.msb - range.lsb + 1 :
+    range.lsb - range.msb + 1;
+}
+
+static int ref_width(const VlogModule *module, const VlogRef *ref)
+{
+  const VlogSignal *signal;
+
+  if (ref->has_select) {
+    return ref->select_msb >= ref->select_lsb ?
+      ref->select_msb - ref->select_lsb + 1 :
+      ref->select_lsb - ref->select_msb + 1;
+  }
+
+  signal = find_signal_const(module, ref->name);
+  if (signal == NULL) {
+    return 1;
+  }
+  return range_width(signal->range);
+}
+
+static int ref_bit_number(const VlogModule *module,
+                          const VlogRef *ref,
+                          int bit_index,
+                          int *bit_number)
+{
+  const VlogSignal *signal;
+  int lsb;
+  int msb;
+  int width;
+
+  if (ref->has_select) {
+    msb = ref->select_msb;
+    lsb = ref->select_lsb;
+  } else {
+    signal = find_signal_const(module, ref->name);
+    if (signal == NULL || !signal->range.has_range) {
+      if (bit_index != 0) {
+        return 0;
+      }
+      *bit_number = 0;
+      return 1;
+    }
+    msb = signal->range.msb;
+    lsb = signal->range.lsb;
+  }
+
+  width = msb >= lsb ? msb - lsb + 1 : lsb - msb + 1;
+  if (bit_index < 0 || bit_index >= width) {
+    return 0;
+  }
+
+  *bit_number = msb >= lsb ? lsb + bit_index : lsb - bit_index;
+  return 1;
+}
+
+static int number_width(const char *text)
+{
+  const char *quote;
+  const char *digits;
+  char base;
+  int width;
+  int count;
+  char *endptr;
+
+  quote = strchr(text, '\'');
+  if (quote == NULL) {
+    return 1;
+  }
+
+  width = 0;
+  if (quote != text) {
+    char *width_text;
+
+    width_text = vlog_strndup(text, (unsigned int)(quote - text));
+    width = (int)strtol(width_text, &endptr, 10);
+    free(width_text);
+    if (*endptr == '\0' && width > 0) {
+      return width;
+    }
+  }
+
+  digits = quote + 1;
+  if (*digits == 's' || *digits == 'S') {
+    digits++;
+  }
+  base = (char)tolower((unsigned char)*digits);
+  if (base == '\0') {
+    return 1;
+  }
+  digits++;
+
+  count = 0;
+  while (*digits != '\0') {
+    if (*digits != '_') {
+      if (base == 'b') count += 1;
+      else if (base == 'o') count += 3;
+      else if (base == 'h') count += 4;
+      else count += 1;
+    }
+    digits++;
+  }
+  return count == 0 ? 1 : count;
+}
+
+static int max_int(int left, int right)
+{
+  return left > right ? left : right;
+}
+
+static int expr_width(const VlogModule *module, const VlogExpr *expr)
+{
+  int width;
+  const VlogExprList *item;
+
+  if (expr == NULL) {
+    return 1;
+  }
+
+  if (expr->kind == VLOG_EXPR_REF) {
+    return ref_width(module, &expr->ref);
+  }
+  if (expr->kind == VLOG_EXPR_CONST) {
+    return number_width(expr->text);
+  }
+  if (expr->kind == VLOG_EXPR_UNARY) {
+    return expr_width(module, expr->left);
+  }
+  if (expr->kind == VLOG_EXPR_BINARY) {
+    if (expr->op == VLOG_OP_EQ || expr->op == VLOG_OP_NE) {
+      return 1;
+    }
+    return max_int(expr_width(module, expr->left),
+                   expr_width(module, expr->right));
+  }
+  if (expr->kind == VLOG_EXPR_TERNARY) {
+    return max_int(expr_width(module, expr->right),
+                   expr_width(module, expr->third));
+  }
+  if (expr->kind == VLOG_EXPR_CONCAT) {
+    width = 0;
+    for (item = expr->items; item != NULL; item = item->next) {
+      width += expr_width(module, item->expr);
+    }
+    return width == 0 ? 1 : width;
+  }
+  return 1;
+}
+
+static int expr_contains_ternary(const VlogExpr *expr)
+{
+  const VlogExprList *item;
+
+  if (expr == NULL) {
+    return 0;
+  }
+  if (expr->kind == VLOG_EXPR_TERNARY) {
+    return 1;
+  }
+  if (expr_contains_ternary(expr->left) ||
+      expr_contains_ternary(expr->right) ||
+      expr_contains_ternary(expr->third)) {
+    return 1;
+  }
+  for (item = expr->items; item != NULL; item = item->next) {
+    if (expr_contains_ternary(item->expr)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static const char *binary_op_text(VlogOp op)
 {
   if (op == VLOG_OP_AND || op == VLOG_OP_LOGIC_AND) return "and";
@@ -408,7 +586,279 @@ static const char *binary_op_text(VlogOp op)
   return "";
 }
 
-static char *emit_expr(const VlogExpr *expr, char *error, unsigned int error_size)
+static char *emit_expr(const VlogModule *module,
+                       const VlogExpr *expr,
+                       char *error,
+                       unsigned int error_size);
+
+static char *emit_expr_bit(const VlogModule *module,
+                           const VlogExpr *expr,
+                           int bit_index,
+                           char *error,
+                           unsigned int error_size);
+
+static char *emit_condition_expr(const VlogModule *module,
+                                 const VlogExpr *expr,
+                                 char *error,
+                                 unsigned int error_size)
+{
+  int width;
+  int i;
+  StrBuf sb;
+
+  width = expr_width(module, expr);
+  if (width <= 1) {
+    return emit_expr(module, expr, error, error_size);
+  }
+
+  sb_init(&sb);
+  for (i = 0; i < width; i++) {
+    char *bit;
+
+    bit = emit_expr_bit(module, expr, i, error, error_size);
+    if (bit == NULL) {
+      sb_free(&sb);
+      return NULL;
+    }
+    if (i == 0) {
+      sb_append(&sb, "(");
+      sb_append(&sb, bit);
+    } else {
+      sb_append(&sb, " or ");
+      sb_append(&sb, bit);
+    }
+    free(bit);
+  }
+  sb_append(&sb, ")");
+  return sb_take(&sb);
+}
+
+static char *emit_equality_expr(const VlogModule *module,
+                                const VlogExpr *left_expr,
+                                const VlogExpr *right_expr,
+                                int negate,
+                                char *error,
+                                unsigned int error_size)
+{
+  int width;
+  int i;
+  StrBuf diff;
+  StrBuf out;
+
+  width = max_int(expr_width(module, left_expr), expr_width(module, right_expr));
+  if (width < 1) {
+    width = 1;
+  }
+
+  sb_init(&diff);
+  for (i = 0; i < width; i++) {
+    char *left;
+    char *right;
+
+    left = emit_expr_bit(module, left_expr, i, error, error_size);
+    if (left == NULL) {
+      sb_free(&diff);
+      return NULL;
+    }
+    right = emit_expr_bit(module, right_expr, i, error, error_size);
+    if (right == NULL) {
+      free(left);
+      sb_free(&diff);
+      return NULL;
+    }
+
+    if (i == 0) {
+      sb_append(&diff, "(");
+    } else {
+      sb_append(&diff, " or ");
+    }
+    sb_appendf(&diff, "(%s xor %s)", left, right);
+    free(left);
+    free(right);
+  }
+  sb_append(&diff, ")");
+
+  if (negate) {
+    return sb_take(&diff);
+  }
+
+  sb_init(&out);
+  sb_appendf(&out, "(not %s)", diff.data);
+  sb_free(&diff);
+  return sb_take(&out);
+}
+
+static char *emit_ref_bit(const VlogModule *module,
+                          const VlogRef *ref,
+                          int bit_index,
+                          char *error,
+                          unsigned int error_size)
+{
+  int width;
+  int bit_number;
+  StrBuf sb;
+
+  width = ref_width(module, ref);
+  if (bit_index >= width) {
+    return vlog_strdup("B\"0\"");
+  }
+  if (!ref_bit_number(module, ref, bit_index, &bit_number)) {
+    set_error(error, error_size, "cannot select bit %d of '%s'", bit_index, ref->name);
+    return NULL;
+  }
+  if (width == 1 && !ref->has_select) {
+    return emit_ref(ref);
+  }
+
+  sb_init(&sb);
+  sb_appendf(&sb, "%s(%d)", ref->name, bit_number);
+  return sb_take(&sb);
+}
+
+static char *emit_const_bit(const VlogExpr *expr,
+                            int bit_index,
+                            int target_width,
+                            char *error,
+                            unsigned int error_size)
+{
+  char *bits;
+  unsigned int len;
+  char text[5];
+
+  bits = normalize_number(expr->text, error, error_size);
+  if (bits == NULL) {
+    return NULL;
+  }
+  bits = fit_width(bits, target_width);
+  len = (unsigned int)strlen(bits);
+  if (bit_index >= (int)len) {
+    free(bits);
+    return vlog_strdup("B\"0\"");
+  }
+
+  text[0] = 'B';
+  text[1] = '"';
+  text[2] = bits[len - 1 - bit_index];
+  text[3] = '"';
+  text[4] = '\0';
+  free(bits);
+  return vlog_strdup(text);
+}
+
+static char *emit_expr_bit(const VlogModule *module,
+                           const VlogExpr *expr,
+                           int bit_index,
+                           char *error,
+                           unsigned int error_size)
+{
+  int width;
+  char *left;
+  char *right;
+  char *third;
+  char *cond;
+  StrBuf sb;
+
+  width = expr_width(module, expr);
+  if (bit_index >= width) {
+    return vlog_strdup("B\"0\"");
+  }
+
+  if (expr->kind == VLOG_EXPR_REF) {
+    return emit_ref_bit(module, &expr->ref, bit_index, error, error_size);
+  }
+  if (expr->kind == VLOG_EXPR_CONST) {
+    return emit_const_bit(expr, bit_index, width, error, error_size);
+  }
+  if (expr->kind == VLOG_EXPR_UNARY) {
+    left = emit_expr_bit(module, expr->left, bit_index, error, error_size);
+    if (left == NULL) return NULL;
+    sb_init(&sb);
+    sb_appendf(&sb, "(not %s)", left);
+    free(left);
+    return sb_take(&sb);
+  }
+  if (expr->kind == VLOG_EXPR_BINARY) {
+    if (expr->op == VLOG_OP_EQ || expr->op == VLOG_OP_NE) {
+      if (bit_index != 0) {
+        return vlog_strdup("B\"0\"");
+      }
+      return emit_equality_expr(module,
+                                expr->left,
+                                expr->right,
+                                expr->op == VLOG_OP_NE,
+                                error,
+                                error_size);
+    }
+
+    left = emit_expr_bit(module, expr->left, bit_index, error, error_size);
+    if (left == NULL) return NULL;
+    right = emit_expr_bit(module, expr->right, bit_index, error, error_size);
+    if (right == NULL) {
+      free(left);
+      return NULL;
+    }
+    sb_init(&sb);
+    sb_appendf(&sb, "(%s %s %s)", left, binary_op_text(expr->op), right);
+    free(left);
+    free(right);
+    return sb_take(&sb);
+  }
+  if (expr->kind == VLOG_EXPR_TERNARY) {
+    cond = emit_condition_expr(module, expr->left, error, error_size);
+    if (cond == NULL) return NULL;
+    right = emit_expr_bit(module, expr->right, bit_index, error, error_size);
+    if (right == NULL) {
+      free(cond);
+      return NULL;
+    }
+    third = emit_expr_bit(module, expr->third, bit_index, error, error_size);
+    if (third == NULL) {
+      free(cond);
+      free(right);
+      return NULL;
+    }
+    sb_init(&sb);
+    sb_appendf(&sb,
+               "((%s and %s) or ((not %s) and %s))",
+               cond,
+               right,
+               cond,
+               third);
+    free(cond);
+    free(right);
+    free(third);
+    return sb_take(&sb);
+  }
+  if (expr->kind == VLOG_EXPR_CONCAT) {
+    const VlogExprList *item;
+    int total_width;
+    int from_msb;
+
+    total_width = expr_width(module, expr);
+    from_msb = total_width - 1 - bit_index;
+    for (item = expr->items; item != NULL; item = item->next) {
+      int item_width;
+
+      item_width = expr_width(module, item->expr);
+      if (from_msb < item_width) {
+        return emit_expr_bit(module,
+                             item->expr,
+                             item_width - 1 - from_msb,
+                             error,
+                             error_size);
+      }
+      from_msb -= item_width;
+    }
+  }
+
+  set_error(error, error_size, "cannot emit bit %d of expression", bit_index);
+  return NULL;
+}
+
+static char *emit_expr(const VlogModule *module,
+                       const VlogExpr *expr,
+                       char *error,
+                       unsigned int error_size)
 {
   char *left;
   char *right;
@@ -435,7 +885,7 @@ static char *emit_expr(const VlogExpr *expr, char *error, unsigned int error_siz
   }
 
   if (expr->kind == VLOG_EXPR_UNARY) {
-    left = emit_expr(expr->left, error, error_size);
+    left = emit_expr(module, expr->left, error, error_size);
     if (left == NULL) return NULL;
     sb_init(&sb);
     sb_appendf(&sb, "(not %s)", left);
@@ -444,36 +894,39 @@ static char *emit_expr(const VlogExpr *expr, char *error, unsigned int error_siz
   }
 
   if (expr->kind == VLOG_EXPR_BINARY) {
-    left = emit_expr(expr->left, error, error_size);
+    if (expr->op == VLOG_OP_EQ || expr->op == VLOG_OP_NE) {
+      return emit_equality_expr(module,
+                                expr->left,
+                                expr->right,
+                                expr->op == VLOG_OP_NE,
+                                error,
+                                error_size);
+    }
+
+    left = emit_expr(module, expr->left, error, error_size);
     if (left == NULL) return NULL;
-    right = emit_expr(expr->right, error, error_size);
+    right = emit_expr(module, expr->right, error, error_size);
     if (right == NULL) {
       free(left);
       return NULL;
     }
 
     sb_init(&sb);
-    if (expr->op == VLOG_OP_EQ) {
-      sb_appendf(&sb, "(not (%s xor %s))", left, right);
-    } else if (expr->op == VLOG_OP_NE) {
-      sb_appendf(&sb, "(%s xor %s)", left, right);
-    } else {
-      sb_appendf(&sb, "(%s %s %s)", left, binary_op_text(expr->op), right);
-    }
+    sb_appendf(&sb, "(%s %s %s)", left, binary_op_text(expr->op), right);
     free(left);
     free(right);
     return sb_take(&sb);
   }
 
   if (expr->kind == VLOG_EXPR_TERNARY) {
-    left = emit_expr(expr->left, error, error_size);
+    left = emit_condition_expr(module, expr->left, error, error_size);
     if (left == NULL) return NULL;
-    right = emit_expr(expr->right, error, error_size);
+    right = emit_expr(module, expr->right, error, error_size);
     if (right == NULL) {
       free(left);
       return NULL;
     }
-    third = emit_expr(expr->third, error, error_size);
+    third = emit_expr(module, expr->third, error, error_size);
     if (third == NULL) {
       free(left);
       free(right);
@@ -502,7 +955,7 @@ static char *emit_expr(const VlogExpr *expr, char *error, unsigned int error_siz
     for (item = expr->items; item != NULL; item = item->next) {
       char *part;
 
-      part = emit_expr(item->expr, error, error_size);
+      part = emit_expr(module, item->expr, error, error_size);
       if (part == NULL) {
         sb_free(&sb);
         return NULL;
@@ -527,10 +980,26 @@ static int validate_expr_refs(const VlogModule *module,
                               char *error,
                               unsigned int error_size);
 
+static int refs_same_target(const VlogRef *left, const VlogRef *right)
+{
+  if (strcmp(left->name, right->name) != 0) {
+    return 0;
+  }
+  if (left->has_select != right->has_select) {
+    return 0;
+  }
+  if (!left->has_select) {
+    return 1;
+  }
+  return left->select_msb == right->select_msb &&
+         left->select_lsb == right->select_lsb;
+}
+
 static int validate_module(const VlogModule *module, char *error, unsigned int error_size)
 {
   const VlogPort *port;
   const VlogAssign *assign;
+  const VlogAssign *other_assign;
 
   if (module->name == NULL) {
     set_error(error, error_size, "empty module");
@@ -562,6 +1031,17 @@ static int validate_module(const VlogModule *module, char *error, unsigned int e
     }
     if (!validate_expr_refs(module, assign->expr, error, error_size)) {
       return 0;
+    }
+    for (other_assign = assign->next;
+         other_assign != NULL;
+         other_assign = other_assign->next) {
+      if (refs_same_target(&assign->target, &other_assign->target)) {
+        set_error(error,
+                  error_size,
+                  "multiple assignments drive '%s'",
+                  assign->target.name);
+        return 0;
+      }
     }
   }
   return 1;
@@ -652,9 +1132,43 @@ int vlog_emit_vbe_file(const VlogModule *module,
   for (assign = module->assigns; assign != NULL; assign = assign->next) {
     char *target;
     char *expr;
+    const VlogSignal *target_signal;
+    int target_width;
+
+    target_signal = find_signal_const(module, assign->target.name);
+    target_width = assign->target.has_select || target_signal == NULL ?
+      ref_width(module, &assign->target) :
+      range_width(target_signal->range);
+
+    if (!assign->target.has_select &&
+        target_width > 1 &&
+        expr_contains_ternary(assign->expr)) {
+      int i;
+
+      for (i = 0; i < target_width; i++) {
+        int bit_number;
+
+        if (!ref_bit_number(module, &assign->target, i, &bit_number)) {
+          set_error(error,
+                    error_size,
+                    "cannot emit bit assignment for '%s'",
+                    assign->target.name);
+          fclose(out);
+          return 0;
+        }
+        expr = emit_expr_bit(module, assign->expr, i, error, error_size);
+        if (expr == NULL) {
+          fclose(out);
+          return 0;
+        }
+        fprintf(out, "  %s(%d) <= %s;\n", assign->target.name, bit_number, expr);
+        free(expr);
+      }
+      continue;
+    }
 
     target = emit_ref(&assign->target);
-    expr = emit_expr(assign->expr, error, error_size);
+    expr = emit_expr(module, assign->expr, error, error_size);
     if (expr == NULL) {
       free(target);
       fclose(out);

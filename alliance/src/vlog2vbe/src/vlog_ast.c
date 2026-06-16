@@ -243,6 +243,17 @@ VlogRef vlog_ref_make(const char *name)
   return ref;
 }
 
+static VlogRef vlog_ref_clone(const VlogRef *ref)
+{
+  VlogRef copy;
+
+  copy.name = vlog_strdup(ref->name);
+  copy.has_select = ref->has_select;
+  copy.select_msb = ref->select_msb;
+  copy.select_lsb = ref->select_lsb;
+  return copy;
+}
+
 static VlogExpr *vlog_expr_alloc(VlogExprKind kind, int line)
 {
   VlogExpr *expr;
@@ -340,6 +351,39 @@ VlogExprList *vlog_expr_list_append(VlogExprList *list, VlogExpr *expr)
   }
   *tail = node;
   return list;
+}
+
+static VlogExprList *vlog_expr_list_clone(const VlogExprList *list)
+{
+  VlogExprList *copy;
+
+  copy = NULL;
+  while (list != NULL) {
+    copy = vlog_expr_list_append(copy, vlog_expr_clone(list->expr));
+    list = list->next;
+  }
+  return copy;
+}
+
+VlogExpr *vlog_expr_clone(const VlogExpr *expr)
+{
+  VlogExpr *copy;
+
+  if (expr == NULL) {
+    return NULL;
+  }
+
+  copy = vlog_expr_alloc(expr->kind, expr->line);
+  copy->op = expr->op;
+  if (expr->ref.name != NULL) {
+    copy->ref = vlog_ref_clone(&expr->ref);
+  }
+  copy->text = vlog_strdup(expr->text);
+  copy->left = vlog_expr_clone(expr->left);
+  copy->right = vlog_expr_clone(expr->right);
+  copy->third = vlog_expr_clone(expr->third);
+  copy->items = vlog_expr_list_clone(expr->items);
+  return copy;
 }
 
 void vlog_expr_list_free(VlogExprList *list)

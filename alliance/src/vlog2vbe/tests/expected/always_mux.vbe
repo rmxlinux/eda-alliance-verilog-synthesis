@@ -1,0 +1,13 @@
+ENTITY always_mux IS
+PORT(
+  sel : in BIT;
+  a : in BIT;
+  b : in BIT;
+  y : out BIT
+);
+END always_mux;
+
+ARCHITECTURE behavior_data_flow OF always_mux IS
+BEGIN
+  y <= ((sel and a) or ((not sel) and b));
+END behavior_data_flow;

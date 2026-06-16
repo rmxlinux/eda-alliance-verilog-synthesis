@@ -18,12 +18,14 @@ loon simple_and_g simple_and_l
 - `input`, `output`, `inout`, `wire`, and `reg` declarations;
 - scalar and packed vector ranges using decimal bounds, such as `[3:0]`;
 - continuous assignments, `assign y = expr;`;
+- combinational `always @*` / `always @(*)` with blocking assignments,
+  `if/else`, and `case/default`;
 - identifiers, constants, bit-selects, part-selects, concatenation;
 - `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, and `?:`.
 
-This first version deliberately rejects `always`, hierarchy, parameters,
-generate blocks, delays, four-state constants containing `x/z`, and arithmetic
-operators.  Those are planned for later milestones.
+This version deliberately rejects edge-triggered `always` blocks, hierarchy,
+parameters, generate blocks, delays, four-state constants containing `x/z`,
+and arithmetic operators.  Those are planned for later milestones.
 
 ## Examples
 
