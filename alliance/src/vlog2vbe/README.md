@@ -25,7 +25,10 @@ loon simple_and_g simple_and_l
 - one common asynchronous reset template, such as
   `always @(posedge clk or negedge rst_n) if (!rst_n) q <= 0; else q <= d;`;
 - simple module instances using named or positional port connections;
-- hierarchy flattening into the selected top module before VBE emission;
+- hierarchy flattening into the selected top module before VBE emission, using
+  BOOM-compatible flattened signal names;
+- automatic `vdd`/`vss` power ports and the matching Alliance power-supply
+  assertion in emitted VBE;
 - top selection with `-top module`, a positional module argument, or automatic
   inference when exactly one module is not instantiated by another module;
 - identifiers, constants, bit-selects, part-selects, concatenation;

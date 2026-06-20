@@ -167,14 +167,13 @@ static char *instance_prefix(const char *parent_prefix, const char *instance_nam
 
   parent_len = parent_prefix == NULL ? 0 : (unsigned int)strlen(parent_prefix);
   inst_len = (unsigned int)strlen(instance_name);
-  out = (char *)xmalloc(parent_len + inst_len + 3);
+  out = (char *)xmalloc(parent_len + inst_len + 2);
   if (parent_len > 0) {
     memcpy(out, parent_prefix, parent_len);
   }
   memcpy(out + parent_len, instance_name, inst_len);
   out[parent_len + inst_len] = '_';
-  out[parent_len + inst_len + 1] = '_';
-  out[parent_len + inst_len + 2] = '\0';
+  out[parent_len + inst_len + 1] = '\0';
   return out;
 }
 

@@ -3,7 +3,9 @@ PORT(
   clk : in BIT;
   a : in BIT;
   b : in BIT;
-  q : out BIT
+  q : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END top;
 
@@ -11,6 +13,9 @@ ARCHITECTURE behavior_data_flow OF top IS
   SIGNAL q_reg : REG_BIT REGISTER;
   SIGNAL d : BIT;
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on top"
+  SEVERITY WARNING;
   label0 : BLOCK ((clk and not (clk'STABLE)) = '1')
   BEGIN
     q_reg <= GUARDED d;

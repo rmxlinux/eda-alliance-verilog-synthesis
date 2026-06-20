@@ -3,13 +3,18 @@ PORT(
   clk : in BIT;
   en : in BIT;
   d : in BIT;
-  q : out BIT
+  q : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END dff_en;
 
 ARCHITECTURE behavior_data_flow OF dff_en IS
   SIGNAL q_reg : REG_BIT REGISTER;
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on dff_en"
+  SEVERITY WARNING;
   label0 : BLOCK ((clk and not (clk'STABLE)) = '1')
   BEGIN
     q_reg <= GUARDED ((en and d) or ((not en) and q_reg));

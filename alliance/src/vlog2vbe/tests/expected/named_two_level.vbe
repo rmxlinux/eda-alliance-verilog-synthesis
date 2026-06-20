@@ -4,7 +4,9 @@ PORT(
   b : in BIT;
   c : in BIT;
   d : in BIT;
-  y : out BIT
+  y : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END top;
 
@@ -12,6 +14,9 @@ ARCHITECTURE behavior_data_flow OF top IS
   SIGNAL n1 : BIT;
   SIGNAL n2 : BIT;
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on top"
+  SEVERITY WARNING;
   y <= (n1 or n2);
   n1 <= (a and b);
   n2 <= (c and d);

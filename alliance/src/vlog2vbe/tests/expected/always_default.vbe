@@ -3,11 +3,16 @@ PORT(
   sel : in BIT;
   a : in BIT;
   b : in BIT;
-  y : out BIT
+  y : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END always_default;
 
 ARCHITECTURE behavior_data_flow OF always_default IS
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on always_default"
+  SEVERITY WARNING;
   y <= ((sel and a) or ((not sel) and b));
 END behavior_data_flow;

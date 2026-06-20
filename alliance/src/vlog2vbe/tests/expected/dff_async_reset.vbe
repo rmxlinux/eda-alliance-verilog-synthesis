@@ -3,13 +3,18 @@ PORT(
   clk : in BIT;
   rst_n : in BIT;
   d : in BIT;
-  q : out BIT
+  q : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END dff_async_reset;
 
 ARCHITECTURE behavior_data_flow OF dff_async_reset IS
   SIGNAL q_reg : REG_BIT REGISTER;
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on dff_async_reset"
+  SEVERITY WARNING;
   label0 : BLOCK ((not rst_n) = '1')
   BEGIN
     q_reg <= GUARDED '0';

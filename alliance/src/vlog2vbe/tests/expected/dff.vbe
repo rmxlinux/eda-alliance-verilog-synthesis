@@ -2,13 +2,18 @@ ENTITY dff IS
 PORT(
   clk : in BIT;
   d : in BIT;
-  q : out BIT
+  q : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END dff;
 
 ARCHITECTURE behavior_data_flow OF dff IS
   SIGNAL q_reg : REG_BIT REGISTER;
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on dff"
+  SEVERITY WARNING;
   label0 : BLOCK ((clk and not (clk'STABLE)) = '1')
   BEGIN
     q_reg <= GUARDED d;

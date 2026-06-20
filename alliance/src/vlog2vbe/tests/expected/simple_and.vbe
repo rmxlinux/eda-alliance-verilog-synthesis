@@ -2,11 +2,16 @@ ENTITY simple_and IS
 PORT(
   a : in BIT;
   b : in BIT;
-  y : out BIT
+  y : out BIT;
+  vdd : in BIT;
+  vss : in BIT
 );
 END simple_and;
 
 ARCHITECTURE behavior_data_flow OF simple_and IS
 BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on simple_and"
+  SEVERITY WARNING;
   y <= (a and b);
 END behavior_data_flow;

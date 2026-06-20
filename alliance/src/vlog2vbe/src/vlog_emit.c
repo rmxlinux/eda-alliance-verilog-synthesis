@@ -1288,6 +1288,14 @@ static int validate_module(const VlogModule *module, char *error, unsigned int e
     return 0;
   }
 
+  if (find_signal_const(module, "vdd") != NULL ||
+      find_signal_const(module, "vss") != NULL) {
+    set_error(error,
+              error_size,
+              "signal names 'vdd' and 'vss' are reserved for Alliance power ports");
+    return 0;
+  }
+
   for (port = module->ports; port != NULL; port = port->next) {
     const VlogSignal *signal;
     signal = find_signal_const(module, port->name);
@@ -1438,6 +1446,11 @@ int vlog_emit_vbe_file(const VlogModule *module,
     emit_type(out, signal->range);
     first = 0;
   }
+  if (!first) {
+    fprintf(out, ";\n");
+  }
+  fprintf(out, "  vdd : in BIT;\n");
+  fprintf(out, "  vss : in BIT");
   fprintf(out, "\n);\n");
   fprintf(out, "END %s;\n\n", module->name);
 
@@ -1461,6 +1474,9 @@ int vlog_emit_vbe_file(const VlogModule *module,
     }
   }
   fprintf(out, "BEGIN\n");
+  fprintf(out, "  ASSERT ((vdd and not (vss)) = '1')\n");
+  fprintf(out, "  REPORT \"power supply is missing on %s\"\n", module->name);
+  fprintf(out, "  SEVERITY WARNING;\n");
 
   label = 0;
   for (driver = module->reg_drivers; driver != NULL; driver = driver->next) {
