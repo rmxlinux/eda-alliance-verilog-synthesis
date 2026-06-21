@@ -471,11 +471,12 @@ flatten 避免了多 `.vbe` 文件之间的 module 绑定问题，也让 BOOM/BO
 - 常见异步 reset。
 - 命名端口和位置端口实例化。
 - 层次 flatten。
+- 整数 `parameter`，包括模块头参数、模块体参数和实例 `#(...)` 覆盖。
 - 常见布尔表达式、比较、拼接、位选/片选、条件表达式。
 
 暂不支持：
 
-- parameter/localparam 和 parameter override。
+- localparam。
 - generate。
 - arithmetic operator。
 - signed 复杂规则。

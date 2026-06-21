@@ -3,7 +3,7 @@ GENERATED_DIR = generated
 
 COMB_CASES = simple_and mux2 vector_ops always_mux always_default case_decoder
 SEQ_CASES = dff dff_en dff_async_reset
-HIER_CASES = named_two_level positional_chain seq_instance nested_modules
+HIER_CASES = named_two_level positional_chain seq_instance nested_modules parameterized
 CASES = $(COMB_CASES) $(SEQ_CASES) $(HIER_CASES)
 GENERATED = $(addprefix $(GENERATED_DIR)/,$(addsuffix .vbe,$(CASES)))
 
@@ -34,6 +34,7 @@ check: all
 	diff -u expected/positional_chain.vbe generated/positional_chain.vbe
 	diff -u expected/seq_instance.vbe generated/seq_instance.vbe
 	diff -u expected/nested_modules.vbe generated/nested_modules.vbe
+	diff -u expected/parameterized.vbe generated/parameterized.vbe
 
 clean:
 	rm -rf $(GENERATED_DIR)

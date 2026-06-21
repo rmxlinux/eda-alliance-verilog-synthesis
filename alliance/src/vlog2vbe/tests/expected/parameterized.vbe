@@ -1,0 +1,20 @@
+ENTITY top IS
+PORT(
+  a : in BIT_VECTOR(3 downto 0);
+  y : out BIT_VECTOR(3 downto 0);
+  z : out BIT;
+  vdd : in BIT;
+  vss : in BIT
+);
+END top;
+
+ARCHITECTURE behavior_data_flow OF top IS
+  SIGNAL t : BIT_VECTOR(3 downto 0);
+BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on top"
+  SEVERITY WARNING;
+  y <= t;
+  t <= a;
+  z <= (not t(2));
+END behavior_data_flow;

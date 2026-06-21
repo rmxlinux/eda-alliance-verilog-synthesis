@@ -16,7 +16,9 @@ loon simple_and_g simple_and_l
 - one or more Verilog modules per file;
 - ANSI and non-ANSI port declarations;
 - `input`, `output`, `inout`, `wire`, and `reg` declarations;
-- scalar and packed vector ranges using decimal bounds, such as `[3:0]`;
+- scalar and packed vector ranges using decimal bounds or integer parameters,
+  such as `[3:0]` and `[W-1:0]`;
+- integer `parameter` declarations in module headers or module bodies;
 - continuous assignments, `assign y = expr;`;
 - combinational `always @*` / `always @(*)` with blocking assignments,
   `if/else`, and `case/default`;
@@ -25,6 +27,7 @@ loon simple_and_g simple_and_l
 - one common asynchronous reset template, such as
   `always @(posedge clk or negedge rst_n) if (!rst_n) q <= 0; else q <= d;`;
 - simple module instances using named or positional port connections;
+- named and positional parameter overrides, such as `#(.W(4))` and `#(4)`;
 - hierarchy flattening into the selected top module before VBE emission, using
   BOOM-compatible flattened signal names;
 - automatic `vdd`/`vss` power ports and the matching Alliance power-supply
@@ -34,10 +37,10 @@ loon simple_and_g simple_and_l
 - identifiers, constants, bit-selects, part-selects, concatenation;
 - `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, and `?:`.
 
-This version deliberately rejects parameters, generate blocks, delays,
+This version deliberately rejects `localparam`, generate blocks, delays,
 multiple asynchronous reset signals in one always block, four-state constants
-containing `x/z`, arithmetic operators, and complex instance connections such
-as parameter overrides or output ports connected to non-assignable expressions.
+containing `x/z`, general RTL arithmetic operators, and complex instance
+connections such as output ports connected to non-assignable expressions.
 Those are planned for later milestones.
 
 ## Examples

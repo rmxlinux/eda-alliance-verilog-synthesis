@@ -12,6 +12,12 @@ typedef struct PortBinding {
   struct PortBinding *next;
 } PortBinding;
 
+typedef struct ParamBinding {
+  char *name;
+  int value;
+  struct ParamBinding *next;
+} ParamBinding;
+
 typedef struct ModuleStack {
   const VlogModule *module;
   const struct ModuleStack *next;
@@ -23,6 +29,7 @@ typedef struct ElabContext {
   const VlogModule *module;
   const char *prefix;
   const PortBinding *bindings;
+  const ParamBinding *params;
   char *error;
   unsigned int error_size;
 } ElabContext;
@@ -73,6 +80,131 @@ static const VlogPort *find_port_const(const VlogModule *module, const char *nam
     }
   }
   return NULL;
+}
+
+static const ParamBinding *param_find_const(const ParamBinding *params, const char *name)
+{
+  while (params != NULL) {
+    if (strcmp(params->name, name) == 0) {
+      return params;
+    }
+    params = params->next;
+  }
+  return NULL;
+}
+
+static int param_append(ParamBinding **params,
+                        const char *name,
+                        int value,
+                        char *error,
+                        unsigned int error_size)
+{
+  ParamBinding *node;
+  ParamBinding **tail;
+
+  if (param_find_const(*params, name) != NULL) {
+    set_error(error, error_size, "duplicate parameter '%s'", name);
+    return 0;
+  }
+
+  node = (ParamBinding *)xmalloc(sizeof(ParamBinding));
+  node->name = vlog_strdup(name);
+  node->value = value;
+  node->next = NULL;
+
+  tail = params;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = node;
+  return 1;
+}
+
+static void param_free(ParamBinding *params)
+{
+  ParamBinding *next;
+
+  while (params != NULL) {
+    next = params->next;
+    free(params->name);
+    free(params);
+    params = next;
+  }
+}
+
+static int eval_int_expr(const ParamBinding *params,
+                         const VlogIntExpr *expr,
+                         int *value,
+                         char *error,
+                         unsigned int error_size)
+{
+  int left;
+  int right;
+  const ParamBinding *binding;
+
+  if (expr == NULL) {
+    set_error(error, error_size, "missing integer expression");
+    return 0;
+  }
+
+  if (expr->kind == VLOG_INT_CONST) {
+    *value = expr->value;
+    return 1;
+  }
+
+  if (expr->kind == VLOG_INT_REF) {
+    binding = param_find_const(params, expr->name);
+    if (binding == NULL) {
+      set_error(error,
+                error_size,
+                "line %d: unknown parameter '%s'",
+                expr->line,
+                expr->name);
+      return 0;
+    }
+    *value = binding->value;
+    return 1;
+  }
+
+  if (expr->kind == VLOG_INT_UNARY) {
+    if (!eval_int_expr(params, expr->left, &left, error, error_size)) {
+      return 0;
+    }
+    if (expr->op == VLOG_INT_OP_NEG) {
+      *value = -left;
+      return 1;
+    }
+  }
+
+  if (expr->kind == VLOG_INT_BINARY) {
+    if (!eval_int_expr(params, expr->left, &left, error, error_size) ||
+        !eval_int_expr(params, expr->right, &right, error, error_size)) {
+      return 0;
+    }
+    if (expr->op == VLOG_INT_OP_ADD) {
+      *value = left + right;
+      return 1;
+    }
+    if (expr->op == VLOG_INT_OP_SUB) {
+      *value = left - right;
+      return 1;
+    }
+    if (expr->op == VLOG_INT_OP_MUL) {
+      *value = left * right;
+      return 1;
+    }
+    if (expr->op == VLOG_INT_OP_DIV || expr->op == VLOG_INT_OP_MOD) {
+      if (right == 0) {
+        set_error(error, error_size, "line %d: division by zero in parameter expression", expr->line);
+        return 0;
+      }
+      *value = expr->op == VLOG_INT_OP_DIV ? left / right : left % right;
+      return 1;
+    }
+  }
+
+  set_error(error, error_size, "line %d: unsupported parameter expression", expr->line);
+  return 0;
 }
 
 static PortBinding *binding_find(PortBinding *bindings, const char *port_name)
@@ -185,7 +317,97 @@ static VlogRef ref_clone_with_name(const VlogRef *ref, const char *name)
   out.has_select = ref->has_select;
   out.select_msb = ref->select_msb;
   out.select_lsb = ref->select_lsb;
+  out.select_msb_expr = NULL;
+  out.select_lsb_expr = NULL;
   return out;
+}
+
+static int resolve_range(const ElabContext *ctx,
+                         VlogRange range,
+                         int line,
+                         VlogRange *out)
+{
+  *out = vlog_range_none();
+  if (!range.has_range) {
+    return 1;
+  }
+
+  out->has_range = 1;
+  if (range.msb_expr != NULL) {
+    if (!eval_int_expr(ctx->params,
+                       range.msb_expr,
+                       &out->msb,
+                       ctx->error,
+                       ctx->error_size)) {
+      return 0;
+    }
+  } else {
+    out->msb = range.msb;
+  }
+
+  if (range.lsb_expr != NULL) {
+    if (!eval_int_expr(ctx->params,
+                       range.lsb_expr,
+                       &out->lsb,
+                       ctx->error,
+                       ctx->error_size)) {
+      return 0;
+    }
+  } else {
+    out->lsb = range.lsb;
+  }
+
+  if (out->msb < 0 || out->lsb < 0) {
+    set_error(ctx->error, ctx->error_size, "line %d: negative range bound", line);
+    return 0;
+  }
+  return 1;
+}
+
+static int resolve_ref(const ElabContext *ctx,
+                       const VlogRef *ref,
+                       int line,
+                       VlogRef *out)
+{
+  *out = ref_clone_with_name(ref, ref->name);
+  if (!ref->has_select) {
+    return 1;
+  }
+
+  if (ref->select_msb_expr != NULL) {
+    if (!eval_int_expr(ctx->params,
+                       ref->select_msb_expr,
+                       &out->select_msb,
+                       ctx->error,
+                       ctx->error_size)) {
+      vlog_ref_free(out);
+      return 0;
+    }
+  }
+  if (ref->select_lsb_expr != NULL) {
+    if (!eval_int_expr(ctx->params,
+                       ref->select_lsb_expr,
+                       &out->select_lsb,
+                       ctx->error,
+                       ctx->error_size)) {
+      vlog_ref_free(out);
+      return 0;
+    }
+  }
+  if (out->select_msb < 0 || out->select_lsb < 0) {
+    set_error(ctx->error, ctx->error_size, "line %d: negative bit select", line);
+    vlog_ref_free(out);
+    return 0;
+  }
+  return 1;
+}
+
+static VlogExpr *int_const_expr(int value, int line)
+{
+  char text[32];
+
+  snprintf(text, sizeof(text), "%d", value);
+  return vlog_expr_const(text, line);
 }
 
 static int apply_child_select(VlogRef *target,
@@ -216,38 +438,61 @@ static VlogExpr *rewrite_expr(const ElabContext *ctx, const VlogExpr *expr);
 static VlogExpr *rewrite_ref_expr(const ElabContext *ctx, const VlogRef *ref, int line)
 {
   const PortBinding *binding;
+  const ParamBinding *param;
   char *name;
+  VlogRef resolved_ref;
   VlogRef out_ref;
   VlogExpr *out;
 
-  binding = binding_find_const(ctx->bindings, ref->name);
+  param = param_find_const(ctx->params, ref->name);
+  if (param != NULL) {
+    if (ref->has_select) {
+      set_error(ctx->error,
+                ctx->error_size,
+                "line %d: parameter '%s' cannot be bit-selected in this version",
+                line,
+                ref->name);
+      return NULL;
+    }
+    return int_const_expr(param->value, line);
+  }
+
+  if (!resolve_ref(ctx, ref, line, &resolved_ref)) {
+    return NULL;
+  }
+
+  binding = binding_find_const(ctx->bindings, resolved_ref.name);
   if (binding != NULL && binding->expr != NULL) {
     out = vlog_expr_clone(binding->expr);
-    if (ref->has_select) {
+    if (resolved_ref.has_select) {
       if (out->kind != VLOG_EXPR_REF) {
         set_error(ctx->error,
                   ctx->error_size,
                   "line %d: selected port '%s' is connected to a non-reference expression",
                   line,
-                  ref->name);
+                  resolved_ref.name);
         vlog_expr_free(out);
+        vlog_ref_free(&resolved_ref);
         return NULL;
       }
       if (!apply_child_select(&out->ref,
-                              ref,
+                              &resolved_ref,
                               line,
                               ctx->error,
                               ctx->error_size)) {
         vlog_expr_free(out);
+        vlog_ref_free(&resolved_ref);
         return NULL;
       }
     }
+    vlog_ref_free(&resolved_ref);
     return out;
   }
 
-  name = prefixed_name(ctx->prefix, ref->name);
-  out_ref = ref_clone_with_name(ref, name);
+  name = prefixed_name(ctx->prefix, resolved_ref.name);
+  out_ref = ref_clone_with_name(&resolved_ref, name);
   free(name);
+  vlog_ref_free(&resolved_ref);
   return vlog_expr_ref(out_ref, line);
 }
 
@@ -334,29 +579,47 @@ static int rewrite_lvalue_ref(const ElabContext *ctx,
                               VlogRef *out)
 {
   const PortBinding *binding;
+  VlogRef resolved_ref;
   char *name;
 
-  binding = binding_find_const(ctx->bindings, ref->name);
+  if (param_find_const(ctx->params, ref->name) != NULL) {
+    set_error(ctx->error,
+              ctx->error_size,
+              "line %d: parameter '%s' cannot be assigned",
+              line,
+              ref->name);
+    return 0;
+  }
+
+  if (!resolve_ref(ctx, ref, line, &resolved_ref)) {
+    return 0;
+  }
+
+  binding = binding_find_const(ctx->bindings, resolved_ref.name);
   if (binding != NULL && binding->expr != NULL) {
     if (binding->expr->kind != VLOG_EXPR_REF) {
       set_error(ctx->error,
                 ctx->error_size,
                 "line %d: output port '%s' is connected to a non-assignable expression",
                 line,
-                ref->name);
+                resolved_ref.name);
+      vlog_ref_free(&resolved_ref);
       return 0;
     }
     *out = ref_clone_with_name(&binding->expr->ref, binding->expr->ref.name);
-    if (!apply_child_select(out, ref, line, ctx->error, ctx->error_size)) {
+    if (!apply_child_select(out, &resolved_ref, line, ctx->error, ctx->error_size)) {
       vlog_ref_free(out);
+      vlog_ref_free(&resolved_ref);
       return 0;
     }
+    vlog_ref_free(&resolved_ref);
     return 1;
   }
 
-  name = prefixed_name(ctx->prefix, ref->name);
-  *out = ref_clone_with_name(ref, name);
+  name = prefixed_name(ctx->prefix, resolved_ref.name);
+  *out = ref_clone_with_name(&resolved_ref, name);
   free(name);
+  vlog_ref_free(&resolved_ref);
   return 1;
 }
 
@@ -393,31 +656,43 @@ static char *rewrite_clock_name(const ElabContext *ctx,
   return name;
 }
 
-static int copy_top_signals(const VlogModule *top, VlogModule *flat)
+static int copy_top_signals(const ElabContext *ctx)
 {
   const VlogPort *port;
   const VlogSignal *signal;
 
-  for (port = top->ports; port != NULL; port = port->next) {
-    signal = find_signal_const(top, port->name);
+  for (port = ctx->module->ports; port != NULL; port = port->next) {
+    signal = find_signal_const(ctx->module, port->name);
     if (signal != NULL) {
-      vlog_module_update_signal(flat,
+      VlogRange range;
+
+      if (!resolve_range(ctx, signal->range, 0, &range)) {
+        return 0;
+      }
+      vlog_module_update_signal(ctx->flat,
                                 signal->name,
                                 signal->dir,
                                 1,
                                 signal->is_reg,
-                                signal->range);
+                                range);
+      vlog_range_free(&range);
     }
   }
 
-  for (signal = top->signals; signal != NULL; signal = signal->next) {
+  for (signal = ctx->module->signals; signal != NULL; signal = signal->next) {
     if (!signal->is_port) {
-      vlog_module_update_signal(flat,
+      VlogRange range;
+
+      if (!resolve_range(ctx, signal->range, 0, &range)) {
+        return 0;
+      }
+      vlog_module_update_signal(ctx->flat,
                                 signal->name,
                                 VLOG_DIR_NONE,
                                 0,
                                 signal->is_reg,
-                                signal->range);
+                                range);
+      vlog_range_free(&range);
     }
   }
   return 1;
@@ -453,12 +728,21 @@ static int add_local_child_signals(const ElabContext *ctx)
       free(name);
       return 0;
     }
-    vlog_module_update_signal(ctx->flat,
-                              name,
-                              VLOG_DIR_NONE,
-                              0,
-                              signal->is_reg,
-                              signal->range);
+    {
+      VlogRange range;
+
+      if (!resolve_range(ctx, signal->range, 0, &range)) {
+        free(name);
+        return 0;
+      }
+      vlog_module_update_signal(ctx->flat,
+                                name,
+                                VLOG_DIR_NONE,
+                                0,
+                                signal->is_reg,
+                                range);
+      vlog_range_free(&range);
+    }
     free(name);
   }
   return 1;
@@ -538,6 +822,180 @@ static int module_on_stack(const ModuleStack *stack, const VlogModule *module)
     stack = stack->next;
   }
   return 0;
+}
+
+static const VlogParamOverride *find_named_param_override(const VlogParamOverride *overrides,
+                                                          const char *name)
+{
+  while (overrides != NULL) {
+    if (overrides->is_named &&
+        overrides->param_name != NULL &&
+        strcmp(overrides->param_name, name) == 0) {
+      return overrides;
+    }
+    overrides = overrides->next;
+  }
+  return NULL;
+}
+
+static const VlogParamOverride *find_positional_param_override(const VlogParamOverride *overrides,
+                                                               int index)
+{
+  int current;
+
+  current = 0;
+  while (overrides != NULL) {
+    if (!overrides->is_named) {
+      if (current == index) {
+        return overrides;
+      }
+      current++;
+    }
+    overrides = overrides->next;
+  }
+  return NULL;
+}
+
+static int check_param_overrides(const ElabContext *ctx,
+                                 const VlogModule *child,
+                                 const VlogInstance *instance)
+{
+  const VlogParamOverride *override;
+  int has_named;
+  int has_positional;
+
+  has_named = 0;
+  has_positional = 0;
+  for (override = instance->param_overrides; override != NULL; override = override->next) {
+    const VlogParamOverride *other;
+
+    if (override->is_named) {
+      const VlogParam *param;
+      int found;
+
+      has_named = 1;
+      found = 0;
+      for (param = child->parameters; param != NULL; param = param->next) {
+        if (strcmp(param->name, override->param_name) == 0) {
+          found = 1;
+          break;
+        }
+      }
+      if (!found) {
+        set_error(ctx->error,
+                  ctx->error_size,
+                  "instance '%s' overrides unknown parameter '%s' on module '%s'",
+                  instance->name,
+                  override->param_name,
+                  child->name);
+        return 0;
+      }
+      for (other = override->next; other != NULL; other = other->next) {
+        if (other->is_named &&
+            other->param_name != NULL &&
+            strcmp(other->param_name, override->param_name) == 0) {
+          set_error(ctx->error,
+                    ctx->error_size,
+                    "instance '%s' duplicates parameter override '%s'",
+                    instance->name,
+                    override->param_name);
+          return 0;
+        }
+      }
+    } else {
+      has_positional = 1;
+    }
+  }
+
+  if (has_named && has_positional) {
+    set_error(ctx->error,
+              ctx->error_size,
+              "instance '%s' mixes named and positional parameter overrides",
+              instance->name);
+    return 0;
+  }
+  return 1;
+}
+
+static int build_param_bindings(const ElabContext *parent_ctx,
+                                const VlogModule *child,
+                                const VlogInstance *instance,
+                                ParamBinding **params)
+{
+  const VlogParam *param;
+  int index;
+
+  *params = NULL;
+  if (instance != NULL && !check_param_overrides(parent_ctx, child, instance)) {
+    return 0;
+  }
+
+  index = 0;
+  for (param = child->parameters; param != NULL; param = param->next) {
+    const VlogParamOverride *override;
+    const VlogIntExpr *expr;
+    const ParamBinding *eval_params;
+    int value;
+
+    override = NULL;
+    if (instance != NULL) {
+      override = find_named_param_override(instance->param_overrides, param->name);
+      if (override == NULL) {
+        override = find_positional_param_override(instance->param_overrides, index);
+      }
+    }
+
+    if (override != NULL) {
+      expr = override->expr;
+      eval_params = parent_ctx->params;
+    } else {
+      expr = param->expr;
+      eval_params = *params;
+    }
+
+    if (!eval_int_expr(eval_params,
+                       expr,
+                       &value,
+                       parent_ctx->error,
+                       parent_ctx->error_size)) {
+      param_free(*params);
+      *params = NULL;
+      return 0;
+    }
+    if (!param_append(params,
+                      param->name,
+                      value,
+                      parent_ctx->error,
+                      parent_ctx->error_size)) {
+      param_free(*params);
+      *params = NULL;
+      return 0;
+    }
+    index++;
+  }
+
+  if (instance != NULL) {
+    const VlogParamOverride *override;
+    int positional_count;
+
+    positional_count = 0;
+    for (override = instance->param_overrides; override != NULL; override = override->next) {
+      if (!override->is_named) {
+        positional_count++;
+      }
+    }
+    if (positional_count > index) {
+      set_error(parent_ctx->error,
+                parent_ctx->error_size,
+                "instance '%s' has too many positional parameter overrides",
+                instance->name);
+      param_free(*params);
+      *params = NULL;
+      return 0;
+    }
+  }
+
+  return 1;
 }
 
 static int inline_module(const ElabContext *ctx, const ModuleStack *stack);
@@ -704,6 +1162,7 @@ static int inline_instance(const ElabContext *ctx,
 {
   const VlogModule *child;
   PortBinding *bindings;
+  ParamBinding *params;
   char *prefix;
   ElabContext child_ctx;
   int ok;
@@ -726,7 +1185,12 @@ static int inline_instance(const ElabContext *ctx,
   }
 
   bindings = NULL;
+  params = NULL;
+  if (!build_param_bindings(ctx, child, instance, &params)) {
+    return 0;
+  }
   if (!build_instance_bindings(ctx, child, instance, &bindings)) {
+    param_free(params);
     binding_free(bindings);
     return 0;
   }
@@ -737,11 +1201,13 @@ static int inline_instance(const ElabContext *ctx,
   child_ctx.module = child;
   child_ctx.prefix = prefix;
   child_ctx.bindings = bindings;
+  child_ctx.params = params;
   child_ctx.error = ctx->error;
   child_ctx.error_size = ctx->error_size;
 
   ok = inline_module(&child_ctx, stack);
   free(prefix);
+  param_free(params);
   binding_free(bindings);
   return ok;
 }
@@ -852,6 +1318,7 @@ int vlog_elaborate_design(const VlogDesign *design,
 {
   const VlogModule *top;
   ElabContext ctx;
+  ParamBinding *params;
 
   top = select_top(design, top_name, error, error_size);
   if (top == NULL) {
@@ -860,19 +1327,34 @@ int vlog_elaborate_design(const VlogDesign *design,
 
   vlog_module_init(flat);
   flat->name = vlog_strdup(top->name);
-  copy_top_signals(top, flat);
 
   ctx.design = design;
   ctx.flat = flat;
   ctx.module = top;
   ctx.prefix = "";
   ctx.bindings = NULL;
+  ctx.params = NULL;
   ctx.error = error;
   ctx.error_size = error_size;
 
-  if (!inline_module(&ctx, NULL)) {
+  params = NULL;
+  if (!build_param_bindings(&ctx, top, NULL, &params)) {
     vlog_module_free(flat);
     return 0;
   }
+  ctx.params = params;
+
+  if (!copy_top_signals(&ctx)) {
+    param_free(params);
+    vlog_module_free(flat);
+    return 0;
+  }
+
+  if (!inline_module(&ctx, NULL)) {
+    param_free(params);
+    vlog_module_free(flat);
+    return 0;
+  }
+  param_free(params);
   return 1;
 }

@@ -29,6 +29,7 @@ enum {
   TOK_DEFAULT,
   TOK_POSEDGE,
   TOK_NEGEDGE,
+  TOK_PARAMETER,
   TOK_OR,
   TOK_OROR,
   TOK_ANDAND,
@@ -281,6 +282,7 @@ static int keyword_type(const char *text)
   if (strcmp(text, "default") == 0) return TOK_DEFAULT;
   if (strcmp(text, "posedge") == 0) return TOK_POSEDGE;
   if (strcmp(text, "negedge") == 0) return TOK_NEGEDGE;
+  if (strcmp(text, "parameter") == 0) return TOK_PARAMETER;
   if (strcmp(text, "or") == 0) return TOK_OR;
   return TOK_IDENT;
 }
@@ -401,23 +403,213 @@ static int parser_expect(Parser *parser, int token, const char *what)
   return 0;
 }
 
-static int parse_range_number(Parser *parser, int *value)
+static char *parse_identifier(Parser *parser, const char *what);
+
+static int number_text_to_int(const char *text, int *value)
 {
+  const char *quote;
+  const char *digits;
+  char base;
   char *endptr;
   long number;
+  long accum;
 
-  if (parser->lexer.tok.type != TOK_NUMBER) {
-    parser_error(parser, "expected a decimal range bound");
+  quote = strchr(text, '\'');
+  if (quote == NULL) {
+    number = strtol(text, &endptr, 10);
+    if (*endptr != '\0') {
+      return 0;
+    }
+    *value = (int)number;
+    return 1;
+  }
+
+  digits = quote + 1;
+  if (*digits == 's' || *digits == 'S') {
+    digits++;
+  }
+  base = (char)tolower((unsigned char)*digits);
+  if (base == '\0') {
     return 0;
   }
-  number = strtol(parser->lexer.tok.text, &endptr, 10);
-  if (*endptr != '\0') {
-    parser_error(parser, "range bounds must be decimal constants in this version");
-    return 0;
+  digits++;
+
+  accum = 0;
+  while (*digits != '\0') {
+    int digit;
+
+    if (*digits == '_') {
+      digits++;
+      continue;
+    }
+    if (*digits >= '0' && *digits <= '9') {
+      digit = *digits - '0';
+    } else if (*digits >= 'a' && *digits <= 'f') {
+      digit = *digits - 'a' + 10;
+    } else if (*digits >= 'A' && *digits <= 'F') {
+      digit = *digits - 'A' + 10;
+    } else {
+      return 0;
+    }
+
+    if (base == 'b') {
+      if (digit > 1) return 0;
+      accum = accum * 2 + digit;
+    } else if (base == 'o') {
+      if (digit > 7) return 0;
+      accum = accum * 8 + digit;
+    } else if (base == 'd') {
+      if (digit > 9) return 0;
+      accum = accum * 10 + digit;
+    } else if (base == 'h') {
+      accum = accum * 16 + digit;
+    } else {
+      return 0;
+    }
+    digits++;
   }
-  *value = (int)number;
-  lexer_next(&parser->lexer);
+
+  *value = (int)accum;
   return 1;
+}
+
+static VlogIntExpr *parse_int_expr(Parser *parser);
+
+static VlogIntExpr *parse_int_primary(Parser *parser)
+{
+  int line;
+
+  line = parser->lexer.tok.line;
+  if (parser->lexer.tok.type == TOK_NUMBER) {
+    int value;
+
+    if (!number_text_to_int(parser->lexer.tok.text, &value)) {
+      parser_error(parser, "unsupported integer constant '%s'", parser->lexer.tok.text);
+      return NULL;
+    }
+    lexer_next(&parser->lexer);
+    return vlog_int_expr_const(value, line);
+  }
+
+  if (parser->lexer.tok.type == TOK_IDENT) {
+    char *name;
+    VlogIntExpr *expr;
+
+    name = parse_identifier(parser, "parameter name");
+    if (name == NULL) {
+      return NULL;
+    }
+    expr = vlog_int_expr_ref(name, line);
+    free(name);
+    return expr;
+  }
+
+  if (parser_accept(parser, '(')) {
+    VlogIntExpr *expr;
+
+    expr = parse_int_expr(parser);
+    if (expr == NULL) {
+      return NULL;
+    }
+    if (!parser_expect(parser, ')', "')' after integer expression")) {
+      vlog_int_expr_free(expr);
+      return NULL;
+    }
+    return expr;
+  }
+
+  parser_error(parser, "expected integer expression");
+  return NULL;
+}
+
+static VlogIntExpr *parse_int_unary(Parser *parser)
+{
+  int line;
+
+  line = parser->lexer.tok.line;
+  if (parser_accept(parser, '+')) {
+    return parse_int_unary(parser);
+  }
+  if (parser_accept(parser, '-')) {
+    VlogIntExpr *child;
+
+    child = parse_int_unary(parser);
+    if (child == NULL) {
+      return NULL;
+    }
+    return vlog_int_expr_unary(VLOG_INT_OP_NEG, child, line);
+  }
+  return parse_int_primary(parser);
+}
+
+static VlogIntExpr *parse_int_mul(Parser *parser)
+{
+  VlogIntExpr *left;
+
+  left = parse_int_unary(parser);
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (parser->lexer.tok.type == '*' ||
+         parser->lexer.tok.type == '/' ||
+         parser->lexer.tok.type == '%') {
+    VlogIntOp op;
+    VlogIntExpr *right;
+    int line;
+
+    line = parser->lexer.tok.line;
+    op = parser->lexer.tok.type == '*' ? VLOG_INT_OP_MUL :
+         parser->lexer.tok.type == '/' ? VLOG_INT_OP_DIV :
+         VLOG_INT_OP_MOD;
+    lexer_next(&parser->lexer);
+    right = parse_int_unary(parser);
+    if (right == NULL) {
+      vlog_int_expr_free(left);
+      return NULL;
+    }
+    left = vlog_int_expr_binary(op, left, right, line);
+  }
+
+  return left;
+}
+
+static VlogIntExpr *parse_int_expr(Parser *parser)
+{
+  VlogIntExpr *left;
+
+  left = parse_int_mul(parser);
+  if (left == NULL) {
+    return NULL;
+  }
+
+  while (parser->lexer.tok.type == '+' ||
+         parser->lexer.tok.type == '-') {
+    VlogIntOp op;
+    VlogIntExpr *right;
+    int line;
+
+    line = parser->lexer.tok.line;
+    op = parser->lexer.tok.type == '+' ? VLOG_INT_OP_ADD : VLOG_INT_OP_SUB;
+    lexer_next(&parser->lexer);
+    right = parse_int_mul(parser);
+    if (right == NULL) {
+      vlog_int_expr_free(left);
+      return NULL;
+    }
+    left = vlog_int_expr_binary(op, left, right, line);
+  }
+
+  return left;
+}
+
+static int int_expr_const_value(const VlogIntExpr *expr, int *value)
+{
+  if (expr != NULL && expr->kind == VLOG_INT_CONST) {
+    *value = expr->value;
+    return 1;
+  }
+  return 0;
 }
 
 static int parse_optional_range(Parser *parser, VlogRange *range)
@@ -425,14 +617,20 @@ static int parse_optional_range(Parser *parser, VlogRange *range)
   range->has_range = 0;
   range->msb = 0;
   range->lsb = 0;
+  range->msb_expr = NULL;
+  range->lsb_expr = NULL;
 
   if (!parser_accept(parser, '[')) {
     return 1;
   }
   range->has_range = 1;
-  if (!parse_range_number(parser, &range->msb)) return 0;
+  range->msb_expr = parse_int_expr(parser);
+  if (range->msb_expr == NULL) return 0;
+  int_expr_const_value(range->msb_expr, &range->msb);
   if (!parser_expect(parser, ':', "':' in range")) return 0;
-  if (!parse_range_number(parser, &range->lsb)) return 0;
+  range->lsb_expr = parse_int_expr(parser);
+  if (range->lsb_expr == NULL) return 0;
+  int_expr_const_value(range->lsb_expr, &range->lsb);
   if (!parser_expect(parser, ']', "']' after range")) return 0;
   return 1;
 }
@@ -526,6 +724,95 @@ static int parse_port_list(Parser *parser)
   return 0;
 }
 
+static void parse_optional_parameter_type(Parser *parser)
+{
+  VlogRange ignored_range;
+  int ignored_reg;
+
+  ignored_reg = 0;
+  if (parser->lexer.tok.type == TOK_IDENT &&
+      strcmp(parser->lexer.tok.text, "integer") == 0) {
+    lexer_next(&parser->lexer);
+  }
+  parse_optional_type_words(parser, &ignored_reg);
+  ignored_range = vlog_range_none();
+  if (parser->lexer.tok.type == '[') {
+    parse_optional_range(parser, &ignored_range);
+    vlog_range_free(&ignored_range);
+  }
+}
+
+static int parse_parameter_assignment(Parser *parser)
+{
+  char *name;
+  VlogIntExpr *expr;
+  int line;
+
+  line = parser->lexer.tok.line;
+  name = parse_identifier(parser, "parameter name");
+  if (name == NULL) {
+    return 0;
+  }
+  if (!parser_expect(parser, '=', "'=' in parameter declaration")) {
+    free(name);
+    return 0;
+  }
+  expr = parse_int_expr(parser);
+  if (expr == NULL) {
+    free(name);
+    return 0;
+  }
+  vlog_module_add_param(parser->module, name, expr, line);
+  free(name);
+  return 1;
+}
+
+static int parse_parameter_declaration(Parser *parser)
+{
+  if (!parser_expect(parser, TOK_PARAMETER, "'parameter'")) {
+    return 0;
+  }
+  parse_optional_parameter_type(parser);
+
+  while (!parser->failed) {
+    if (!parse_parameter_assignment(parser)) {
+      return 0;
+    }
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    return parser_expect(parser, ';', "';' after parameter declaration");
+  }
+  return 0;
+}
+
+static int parse_parameter_port_list(Parser *parser)
+{
+  if (!parser_expect(parser, '#', "'#' before parameter list")) {
+    return 0;
+  }
+  if (!parser_expect(parser, '(', "'(' after '#'")) {
+    return 0;
+  }
+  if (parser_accept(parser, ')')) {
+    return 1;
+  }
+
+  while (!parser->failed) {
+    if (parser_accept(parser, TOK_PARAMETER)) {
+      parse_optional_parameter_type(parser);
+    }
+    if (!parse_parameter_assignment(parser)) {
+      return 0;
+    }
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    return parser_expect(parser, ')', "')' after parameter list");
+  }
+  return 0;
+}
+
 static int parse_ref(Parser *parser, VlogRef *ref)
 {
   char *name;
@@ -540,11 +827,16 @@ static int parse_ref(Parser *parser, VlogRef *ref)
 
   if (parser_accept(parser, '[')) {
     ref->has_select = 1;
-    if (!parse_range_number(parser, &ref->select_msb)) return 0;
+    ref->select_msb_expr = parse_int_expr(parser);
+    if (ref->select_msb_expr == NULL) return 0;
+    int_expr_const_value(ref->select_msb_expr, &ref->select_msb);
     if (parser_accept(parser, ':')) {
-      if (!parse_range_number(parser, &ref->select_lsb)) return 0;
+      ref->select_lsb_expr = parse_int_expr(parser);
+      if (ref->select_lsb_expr == NULL) return 0;
+      int_expr_const_value(ref->select_lsb_expr, &ref->select_lsb);
     } else {
       ref->select_lsb = ref->select_msb;
+      ref->select_lsb_expr = vlog_int_expr_clone(ref->select_msb_expr);
     }
     if (!parser_expect(parser, ']', "']' after select")) return 0;
   }
@@ -2088,9 +2380,104 @@ static int parse_instance_connections(Parser *parser, VlogConn **conns)
   return 0;
 }
 
+static int parse_parameter_overrides(Parser *parser, VlogParamOverride **overrides)
+{
+  int mode;
+
+  *overrides = NULL;
+  mode = 0;
+  if (!parser_expect(parser, '#', "'#' before parameter overrides")) {
+    return 0;
+  }
+  if (!parser_expect(parser, '(', "'(' after '#'")) {
+    return 0;
+  }
+  if (parser_accept(parser, ')')) {
+    return 1;
+  }
+
+  while (!parser->failed) {
+    VlogIntExpr *expr;
+    char *param_name;
+    int line;
+
+    expr = NULL;
+    param_name = NULL;
+    line = parser->lexer.tok.line;
+
+    if (parser_accept(parser, '.')) {
+      if (mode == 2) {
+        parser_error_at(parser, line, "cannot mix named and positional parameter overrides");
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      mode = 1;
+      param_name = parse_identifier(parser, "parameter name in override");
+      if (param_name == NULL) {
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      if (!parser_expect(parser, '(', "'(' after named parameter")) {
+        free(param_name);
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      expr = parse_int_expr(parser);
+      if (expr == NULL) {
+        free(param_name);
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      if (!parser_expect(parser, ')', "')' after named parameter override")) {
+        free(param_name);
+        vlog_int_expr_free(expr);
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      *overrides = vlog_param_override_append(*overrides, param_name, 1, expr, line);
+      free(param_name);
+    } else {
+      if (mode == 1) {
+        parser_error_at(parser, line, "cannot mix named and positional parameter overrides");
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      mode = 2;
+      expr = parse_int_expr(parser);
+      if (expr == NULL) {
+        vlog_param_override_free(*overrides);
+        *overrides = NULL;
+        return 0;
+      }
+      *overrides = vlog_param_override_append(*overrides, NULL, 0, expr, line);
+    }
+
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    if (parser_expect(parser, ')', "')' after parameter overrides")) {
+      return 1;
+    }
+    vlog_param_override_free(*overrides);
+    *overrides = NULL;
+    return 0;
+  }
+
+  vlog_param_override_free(*overrides);
+  *overrides = NULL;
+  return 0;
+}
+
 static int parse_instance(Parser *parser)
 {
   char *module_name;
+  VlogParamOverride *param_overrides;
   int line;
 
   line = parser->lexer.tok.line;
@@ -2099,12 +2486,12 @@ static int parse_instance(Parser *parser)
     return 0;
   }
 
+  param_overrides = NULL;
   if (parser->lexer.tok.type == '#') {
-    parser_error_at(parser,
-                    line,
-                    "parameterized module instances are not supported yet");
-    free(module_name);
-    return 0;
+    if (!parse_parameter_overrides(parser, &param_overrides)) {
+      free(module_name);
+      return 0;
+    }
   }
 
   while (!parser->failed) {
@@ -2113,12 +2500,14 @@ static int parse_instance(Parser *parser)
 
     instance_name = parse_identifier(parser, "instance name");
     if (instance_name == NULL) {
+      vlog_param_override_free(param_overrides);
       free(module_name);
       return 0;
     }
 
     conns = NULL;
     if (!parse_instance_connections(parser, &conns)) {
+      vlog_param_override_free(param_overrides);
       free(module_name);
       free(instance_name);
       return 0;
@@ -2127,6 +2516,7 @@ static int parse_instance(Parser *parser)
     vlog_module_add_instance(parser->module,
                              module_name,
                              instance_name,
+                             vlog_param_override_clone(param_overrides),
                              conns,
                              line);
     free(instance_name);
@@ -2134,10 +2524,12 @@ static int parse_instance(Parser *parser)
     if (parser_accept(parser, ',')) {
       continue;
     }
+    vlog_param_override_free(param_overrides);
     free(module_name);
     return parser_expect(parser, ';', "';' after module instance");
   }
 
+  vlog_param_override_free(param_overrides);
   free(module_name);
   return 0;
 }
@@ -2152,6 +2544,9 @@ static int parse_module(Parser *parser)
   if (name == NULL) return 0;
   parser->module->name = name;
 
+  if (parser->lexer.tok.type == '#') {
+    if (!parse_parameter_port_list(parser)) return 0;
+  }
   if (!parser_expect(parser, '(', "'(' after module name")) return 0;
   if (!parse_port_list(parser)) return 0;
   if (!parser_expect(parser, ';', "';' after module header")) return 0;
@@ -2165,6 +2560,8 @@ static int parse_module(Parser *parser)
         parser->lexer.tok.type == TOK_WIRE ||
         parser->lexer.tok.type == TOK_REG) {
       if (!parse_declaration(parser)) return 0;
+    } else if (parser->lexer.tok.type == TOK_PARAMETER) {
+      if (!parse_parameter_declaration(parser)) return 0;
     } else if (parser->lexer.tok.type == TOK_ASSIGN) {
       if (!parse_assign(parser)) return 0;
     } else if (parser->lexer.tok.type == TOK_ALWAYS) {

@@ -14,6 +14,8 @@ typedef struct VlogRange {
   int has_range;
   int msb;
   int lsb;
+  struct VlogIntExpr *msb_expr;
+  struct VlogIntExpr *lsb_expr;
 } VlogRange;
 
 typedef struct VlogRef {
@@ -21,7 +23,36 @@ typedef struct VlogRef {
   int has_select;
   int select_msb;
   int select_lsb;
+  struct VlogIntExpr *select_msb_expr;
+  struct VlogIntExpr *select_lsb_expr;
 } VlogRef;
+
+typedef enum VlogIntExprKind {
+  VLOG_INT_CONST = 0,
+  VLOG_INT_REF,
+  VLOG_INT_UNARY,
+  VLOG_INT_BINARY
+} VlogIntExprKind;
+
+typedef enum VlogIntOp {
+  VLOG_INT_OP_NONE = 0,
+  VLOG_INT_OP_NEG,
+  VLOG_INT_OP_ADD,
+  VLOG_INT_OP_SUB,
+  VLOG_INT_OP_MUL,
+  VLOG_INT_OP_DIV,
+  VLOG_INT_OP_MOD
+} VlogIntOp;
+
+typedef struct VlogIntExpr {
+  VlogIntExprKind kind;
+  VlogIntOp op;
+  int value;
+  char *name;
+  int line;
+  struct VlogIntExpr *left;
+  struct VlogIntExpr *right;
+} VlogIntExpr;
 
 typedef enum VlogExprKind {
   VLOG_EXPR_REF = 0,
@@ -93,9 +124,25 @@ typedef struct VlogConn {
   struct VlogConn *next;
 } VlogConn;
 
+typedef struct VlogParam {
+  char *name;
+  VlogIntExpr *expr;
+  int line;
+  struct VlogParam *next;
+} VlogParam;
+
+typedef struct VlogParamOverride {
+  char *param_name;
+  int is_named;
+  VlogIntExpr *expr;
+  int line;
+  struct VlogParamOverride *next;
+} VlogParamOverride;
+
 typedef struct VlogInstance {
   char *module_name;
   char *name;
+  VlogParamOverride *param_overrides;
   VlogConn *conns;
   int line;
   struct VlogInstance *next;
@@ -113,6 +160,7 @@ typedef struct VlogRegDriver {
 
 typedef struct VlogModule {
   char *name;
+  VlogParam *parameters;
   VlogSignal *signals;
   VlogPort *ports;
   VlogAssign *assigns;
@@ -135,9 +183,15 @@ VlogModule *vlog_design_find_module(const VlogDesign *design, const char *name);
 int vlog_design_add_module(VlogDesign *design, VlogModule *module);
 
 VlogRange vlog_range_none(void);
+VlogRange vlog_range_clone(const VlogRange *range);
+void vlog_range_free(VlogRange *range);
 VlogSignal *vlog_module_find_signal(VlogModule *module, const char *name);
 VlogSignal *vlog_module_ensure_signal(VlogModule *module, const char *name);
 int vlog_module_add_port(VlogModule *module, const char *name);
+int vlog_module_add_param(VlogModule *module,
+                          const char *name,
+                          VlogIntExpr *expr,
+                          int line);
 int vlog_module_update_signal(VlogModule *module,
                               const char *name,
                               VlogDir dir,
@@ -151,6 +205,7 @@ int vlog_module_add_assign(VlogModule *module,
 int vlog_module_add_instance(VlogModule *module,
                              const char *module_name,
                              const char *name,
+                             VlogParamOverride *param_overrides,
                              VlogConn *conns,
                              int line);
 int vlog_module_add_reg_driver(VlogModule *module,
@@ -163,6 +218,16 @@ int vlog_module_add_reg_driver(VlogModule *module,
 
 char *vlog_strdup(const char *text);
 char *vlog_strndup(const char *text, unsigned int length);
+
+VlogIntExpr *vlog_int_expr_const(int value, int line);
+VlogIntExpr *vlog_int_expr_ref(const char *name, int line);
+VlogIntExpr *vlog_int_expr_unary(VlogIntOp op, VlogIntExpr *child, int line);
+VlogIntExpr *vlog_int_expr_binary(VlogIntOp op,
+                                  VlogIntExpr *left,
+                                  VlogIntExpr *right,
+                                  int line);
+VlogIntExpr *vlog_int_expr_clone(const VlogIntExpr *expr);
+void vlog_int_expr_free(VlogIntExpr *expr);
 
 VlogRef vlog_ref_make(const char *name);
 void vlog_ref_free(VlogRef *ref);
@@ -183,8 +248,15 @@ VlogConn *vlog_conn_append(VlogConn *list,
                            int is_named,
                            VlogExpr *expr,
                            int line);
+VlogParamOverride *vlog_param_override_append(VlogParamOverride *list,
+                                              const char *param_name,
+                                              int is_named,
+                                              VlogIntExpr *expr,
+                                              int line);
+VlogParamOverride *vlog_param_override_clone(const VlogParamOverride *list);
 void vlog_expr_free(VlogExpr *expr);
 void vlog_expr_list_free(VlogExprList *list);
 void vlog_conn_free(VlogConn *conn);
+void vlog_param_override_free(VlogParamOverride *override);
 
 #endif

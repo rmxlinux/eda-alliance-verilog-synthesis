@@ -401,6 +401,7 @@ make -C tests VLOG2VBE="${ALLIANCE_TOP}/bin/vlog2vbe" check
 - 边沿触发 `always @(posedge clk)` / `always @(negedge clk)`。
 - 常见异步 reset 模板。
 - 简单 module instance。
+- 整数 `parameter` 声明，以及实例上的命名/位置参数覆盖。
 - 命名端口连接和位置端口连接。
 - 层次 flatten 到 top module。
 - 生成 BOOM 旧 VBE parser 可接受的 flatten 信号名。
@@ -410,7 +411,7 @@ make -C tests VLOG2VBE="${ALLIANCE_TOP}/bin/vlog2vbe" check
 
 暂不支持：
 
-- parameter / localparam / parameter override。
+- localparam。
 - generate。
 - delay / specify / UDP / system task。
 - 四态 `x/z` 精确语义。

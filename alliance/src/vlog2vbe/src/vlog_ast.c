@@ -40,12 +40,41 @@ VlogRange vlog_range_none(void)
   range.has_range = 0;
   range.msb = 0;
   range.lsb = 0;
+  range.msb_expr = NULL;
+  range.lsb_expr = NULL;
   return range;
+}
+
+VlogRange vlog_range_clone(const VlogRange *range)
+{
+  VlogRange copy;
+
+  copy.has_range = range->has_range;
+  copy.msb = range->msb;
+  copy.lsb = range->lsb;
+  copy.msb_expr = vlog_int_expr_clone(range->msb_expr);
+  copy.lsb_expr = vlog_int_expr_clone(range->lsb_expr);
+  return copy;
+}
+
+void vlog_range_free(VlogRange *range)
+{
+  if (range == NULL) {
+    return;
+  }
+  vlog_int_expr_free(range->msb_expr);
+  vlog_int_expr_free(range->lsb_expr);
+  range->msb_expr = NULL;
+  range->lsb_expr = NULL;
+  range->has_range = 0;
+  range->msb = 0;
+  range->lsb = 0;
 }
 
 void vlog_module_init(VlogModule *module)
 {
   module->name = NULL;
+  module->parameters = NULL;
   module->signals = NULL;
   module->ports = NULL;
   module->assigns = NULL;
@@ -98,10 +127,27 @@ void vlog_ref_free(VlogRef *ref)
   if (ref->name != NULL) {
     free(ref->name);
   }
+  vlog_int_expr_free(ref->select_msb_expr);
+  vlog_int_expr_free(ref->select_lsb_expr);
   ref->name = NULL;
   ref->has_select = 0;
   ref->select_msb = 0;
   ref->select_lsb = 0;
+  ref->select_msb_expr = NULL;
+  ref->select_lsb_expr = NULL;
+}
+
+static void vlog_param_free(VlogParam *param)
+{
+  VlogParam *next;
+
+  while (param != NULL) {
+    next = param->next;
+    free(param->name);
+    vlog_int_expr_free(param->expr);
+    free(param);
+    param = next;
+  }
 }
 
 static void vlog_signal_free(VlogSignal *signal)
@@ -111,6 +157,7 @@ static void vlog_signal_free(VlogSignal *signal)
   while (signal != NULL) {
     next = signal->next;
     free(signal->name);
+    vlog_range_free(&signal->range);
     free(signal);
     signal = next;
   }
@@ -162,6 +209,7 @@ static void vlog_instance_free(VlogInstance *instance)
     next = instance->next;
     free(instance->module_name);
     free(instance->name);
+    vlog_param_override_free(instance->param_overrides);
     vlog_conn_free(instance->conns);
     free(instance);
     instance = next;
@@ -189,6 +237,7 @@ void vlog_module_free(VlogModule *module)
     return;
   }
   free(module->name);
+  vlog_param_free(module->parameters);
   vlog_signal_free(module->signals);
   vlog_port_free(module->ports);
   vlog_assign_free(module->assigns);
@@ -288,6 +337,28 @@ int vlog_module_add_port(VlogModule *module, const char *name)
   return 1;
 }
 
+int vlog_module_add_param(VlogModule *module,
+                          const char *name,
+                          VlogIntExpr *expr,
+                          int line)
+{
+  VlogParam *param;
+  VlogParam **tail;
+
+  param = (VlogParam *)vlog_xmalloc(sizeof(VlogParam));
+  param->name = vlog_strdup(name);
+  param->expr = expr;
+  param->line = line;
+  param->next = NULL;
+
+  tail = &module->parameters;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = param;
+  return 1;
+}
+
 int vlog_module_update_signal(VlogModule *module,
                               const char *name,
                               VlogDir dir,
@@ -308,7 +379,8 @@ int vlog_module_update_signal(VlogModule *module,
     signal->is_reg = 1;
   }
   if (range.has_range) {
-    signal->range = range;
+    vlog_range_free(&signal->range);
+    signal->range = vlog_range_clone(&range);
   }
   if (is_port) {
     vlog_module_add_port(module, name);
@@ -341,6 +413,7 @@ int vlog_module_add_assign(VlogModule *module,
 int vlog_module_add_instance(VlogModule *module,
                              const char *module_name,
                              const char *name,
+                             VlogParamOverride *param_overrides,
                              VlogConn *conns,
                              int line)
 {
@@ -350,6 +423,7 @@ int vlog_module_add_instance(VlogModule *module,
   instance = (VlogInstance *)vlog_xmalloc(sizeof(VlogInstance));
   instance->module_name = vlog_strdup(module_name);
   instance->name = vlog_strdup(name);
+  instance->param_overrides = param_overrides;
   instance->conns = conns;
   instance->line = line;
   instance->next = NULL;
@@ -398,6 +472,8 @@ VlogRef vlog_ref_make(const char *name)
   ref.has_select = 0;
   ref.select_msb = 0;
   ref.select_lsb = 0;
+  ref.select_msb_expr = NULL;
+  ref.select_lsb_expr = NULL;
   return ref;
 }
 
@@ -409,7 +485,94 @@ static VlogRef vlog_ref_clone(const VlogRef *ref)
   copy.has_select = ref->has_select;
   copy.select_msb = ref->select_msb;
   copy.select_lsb = ref->select_lsb;
+  copy.select_msb_expr = vlog_int_expr_clone(ref->select_msb_expr);
+  copy.select_lsb_expr = vlog_int_expr_clone(ref->select_lsb_expr);
   return copy;
+}
+
+static VlogIntExpr *vlog_int_expr_alloc(VlogIntExprKind kind, int line)
+{
+  VlogIntExpr *expr;
+
+  expr = (VlogIntExpr *)vlog_xmalloc(sizeof(VlogIntExpr));
+  expr->kind = kind;
+  expr->op = VLOG_INT_OP_NONE;
+  expr->value = 0;
+  expr->name = NULL;
+  expr->line = line;
+  expr->left = NULL;
+  expr->right = NULL;
+  return expr;
+}
+
+VlogIntExpr *vlog_int_expr_const(int value, int line)
+{
+  VlogIntExpr *expr;
+
+  expr = vlog_int_expr_alloc(VLOG_INT_CONST, line);
+  expr->value = value;
+  return expr;
+}
+
+VlogIntExpr *vlog_int_expr_ref(const char *name, int line)
+{
+  VlogIntExpr *expr;
+
+  expr = vlog_int_expr_alloc(VLOG_INT_REF, line);
+  expr->name = vlog_strdup(name);
+  return expr;
+}
+
+VlogIntExpr *vlog_int_expr_unary(VlogIntOp op, VlogIntExpr *child, int line)
+{
+  VlogIntExpr *expr;
+
+  expr = vlog_int_expr_alloc(VLOG_INT_UNARY, line);
+  expr->op = op;
+  expr->left = child;
+  return expr;
+}
+
+VlogIntExpr *vlog_int_expr_binary(VlogIntOp op,
+                                  VlogIntExpr *left,
+                                  VlogIntExpr *right,
+                                  int line)
+{
+  VlogIntExpr *expr;
+
+  expr = vlog_int_expr_alloc(VLOG_INT_BINARY, line);
+  expr->op = op;
+  expr->left = left;
+  expr->right = right;
+  return expr;
+}
+
+VlogIntExpr *vlog_int_expr_clone(const VlogIntExpr *expr)
+{
+  VlogIntExpr *copy;
+
+  if (expr == NULL) {
+    return NULL;
+  }
+
+  copy = vlog_int_expr_alloc(expr->kind, expr->line);
+  copy->op = expr->op;
+  copy->value = expr->value;
+  copy->name = vlog_strdup(expr->name);
+  copy->left = vlog_int_expr_clone(expr->left);
+  copy->right = vlog_int_expr_clone(expr->right);
+  return copy;
+}
+
+void vlog_int_expr_free(VlogIntExpr *expr)
+{
+  if (expr == NULL) {
+    return;
+  }
+  free(expr->name);
+  vlog_int_expr_free(expr->left);
+  vlog_int_expr_free(expr->right);
+  free(expr);
 }
 
 static VlogExpr *vlog_expr_alloc(VlogExprKind kind, int line)
@@ -533,6 +696,59 @@ VlogConn *vlog_conn_append(VlogConn *list,
   }
   *tail = node;
   return list;
+}
+
+VlogParamOverride *vlog_param_override_append(VlogParamOverride *list,
+                                              const char *param_name,
+                                              int is_named,
+                                              VlogIntExpr *expr,
+                                              int line)
+{
+  VlogParamOverride *node;
+  VlogParamOverride **tail;
+
+  node = (VlogParamOverride *)vlog_xmalloc(sizeof(VlogParamOverride));
+  node->param_name = vlog_strdup(param_name);
+  node->is_named = is_named;
+  node->expr = expr;
+  node->line = line;
+  node->next = NULL;
+
+  tail = &list;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = node;
+  return list;
+}
+
+VlogParamOverride *vlog_param_override_clone(const VlogParamOverride *list)
+{
+  VlogParamOverride *copy;
+
+  copy = NULL;
+  while (list != NULL) {
+    copy = vlog_param_override_append(copy,
+                                      list->param_name,
+                                      list->is_named,
+                                      vlog_int_expr_clone(list->expr),
+                                      list->line);
+    list = list->next;
+  }
+  return copy;
+}
+
+void vlog_param_override_free(VlogParamOverride *override)
+{
+  VlogParamOverride *next;
+
+  while (override != NULL) {
+    next = override->next;
+    free(override->param_name);
+    vlog_int_expr_free(override->expr);
+    free(override);
+    override = next;
+  }
 }
 
 static VlogExprList *vlog_expr_list_clone(const VlogExprList *list)
