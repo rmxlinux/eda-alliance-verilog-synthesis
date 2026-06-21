@@ -18,7 +18,7 @@ loon simple_and_g simple_and_l
 - `input`, `output`, `inout`, `wire`, and `reg` declarations;
 - scalar and packed vector ranges using decimal bounds or integer parameters,
   such as `[3:0]` and `[W-1:0]`;
-- integer `parameter` declarations in module headers or module bodies;
+- integer `parameter` and `localparam` declarations;
 - continuous assignments, `assign y = expr;`;
 - combinational `always @*` / `always @(*)` with blocking assignments,
   `if/else`, and `case/default`;
@@ -28,6 +28,8 @@ loon simple_and_g simple_and_l
   `always @(posedge clk or negedge rst_n) if (!rst_n) q <= 0; else q <= d;`;
 - simple module instances using named or positional port connections;
 - named and positional parameter overrides, such as `#(.W(4))` and `#(4)`;
+- static `generate for` loops with `genvar`, named blocks, continuous
+  assignments, and module instances in the generated body;
 - hierarchy flattening into the selected top module before VBE emission, using
   BOOM-compatible flattened signal names;
 - automatic `vdd`/`vss` power ports and the matching Alliance power-supply
@@ -35,12 +37,13 @@ loon simple_and_g simple_and_l
 - top selection with `-top module`, a positional module argument, or automatic
   inference when exactly one module is not instantiated by another module;
 - identifiers, constants, bit-selects, part-selects, concatenation;
-- `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, and `?:`.
+- `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, `?:`, and RTL
+  arithmetic `+`, `-`, `*`.
 
-This version deliberately rejects `localparam`, generate blocks, delays,
+This version deliberately rejects generate-if/case blocks, delays,
 multiple asynchronous reset signals in one always block, four-state constants
-containing `x/z`, general RTL arithmetic operators, and complex instance
-connections such as output ports connected to non-assignable expressions.
+containing `x/z`, division/modulo in ordinary RTL expressions, and complex
+instance connections such as output ports connected to non-assignable expressions.
 Those are planned for later milestones.
 
 ## Examples

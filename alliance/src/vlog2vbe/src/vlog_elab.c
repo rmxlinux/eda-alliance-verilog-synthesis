@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct StrBuf {
+  char *data;
+  unsigned int len;
+  unsigned int cap;
+} StrBuf;
+
 typedef struct PortBinding {
   char *port_name;
   VlogExpr *expr;
@@ -44,6 +50,92 @@ static void *xmalloc(unsigned int size)
     exit(2);
   }
   return ptr;
+}
+
+static void sb_init(StrBuf *sb)
+{
+  sb->data = NULL;
+  sb->len = 0;
+  sb->cap = 0;
+}
+
+static int sb_reserve(StrBuf *sb, unsigned int extra)
+{
+  unsigned int need;
+  unsigned int cap;
+  char *next;
+
+  need = sb->len + extra + 1;
+  if (need <= sb->cap) {
+    return 1;
+  }
+
+  cap = sb->cap == 0 ? 64 : sb->cap;
+  while (cap < need) {
+    cap *= 2;
+  }
+
+  next = (char *)realloc(sb->data, cap);
+  if (next == NULL) {
+    return 0;
+  }
+  sb->data = next;
+  sb->cap = cap;
+  return 1;
+}
+
+static int sb_append(StrBuf *sb, const char *text)
+{
+  unsigned int length;
+
+  length = (unsigned int)strlen(text);
+  if (!sb_reserve(sb, length)) {
+    return 0;
+  }
+  memcpy(sb->data + sb->len, text, length + 1);
+  sb->len += length;
+  return 1;
+}
+
+static int sb_appendf(StrBuf *sb, const char *fmt, ...)
+{
+  va_list args;
+  char small[128];
+  int needed;
+
+  va_start(args, fmt);
+  needed = vsnprintf(small, sizeof(small), fmt, args);
+  va_end(args);
+
+  if (needed < 0) {
+    return 0;
+  }
+  if ((unsigned int)needed < sizeof(small)) {
+    return sb_append(sb, small);
+  }
+
+  if (!sb_reserve(sb, (unsigned int)needed)) {
+    return 0;
+  }
+  va_start(args, fmt);
+  vsnprintf(sb->data + sb->len, sb->cap - sb->len, fmt, args);
+  va_end(args);
+  sb->len += (unsigned int)needed;
+  return 1;
+}
+
+static char *sb_take(StrBuf *sb)
+{
+  char *data;
+
+  if (sb->data == NULL) {
+    return vlog_strdup("");
+  }
+  data = sb->data;
+  sb->data = NULL;
+  sb->len = 0;
+  sb->cap = 0;
+  return data;
 }
 
 static void set_error(char *error, unsigned int error_size, const char *fmt, ...)
@@ -877,6 +969,15 @@ static int check_param_overrides(const ElabContext *ctx,
       found = 0;
       for (param = child->parameters; param != NULL; param = param->next) {
         if (strcmp(param->name, override->param_name) == 0) {
+          if (param->is_local) {
+            set_error(ctx->error,
+                      ctx->error_size,
+                      "instance '%s' cannot override localparam '%s' on module '%s'",
+                      instance->name,
+                      override->param_name,
+                      child->name);
+            return 0;
+          }
           found = 1;
           break;
         }
@@ -938,7 +1039,7 @@ static int build_param_bindings(const ElabContext *parent_ctx,
     int value;
 
     override = NULL;
-    if (instance != NULL) {
+    if (instance != NULL && !param->is_local) {
       override = find_named_param_override(instance->param_overrides, param->name);
       if (override == NULL) {
         override = find_positional_param_override(instance->param_overrides, index);
@@ -971,7 +1072,9 @@ static int build_param_bindings(const ElabContext *parent_ctx,
       *params = NULL;
       return 0;
     }
-    index++;
+    if (!param->is_local) {
+      index++;
+    }
   }
 
   if (instance != NULL) {
@@ -1212,6 +1315,188 @@ static int inline_instance(const ElabContext *ctx,
   return ok;
 }
 
+static int gen_cmp_holds(VlogGenCmp cmp, int value, int limit)
+{
+  if (cmp == VLOG_GEN_CMP_LT) return value < limit;
+  if (cmp == VLOG_GEN_CMP_LE) return value <= limit;
+  if (cmp == VLOG_GEN_CMP_GT) return value > limit;
+  return value >= limit;
+}
+
+static char *gen_iteration_prefix(const char *parent_prefix,
+                                  const char *block_name,
+                                  int value)
+{
+  StrBuf sb;
+
+  sb_init(&sb);
+  if (parent_prefix != NULL) {
+    sb_append(&sb, parent_prefix);
+  }
+  if (block_name != NULL && block_name[0] != '\0') {
+    sb_appendf(&sb, "%s%d_", block_name, value);
+  } else {
+    sb_appendf(&sb, "gen%d_", value);
+  }
+  return sb_take(&sb);
+}
+
+static char *gen_prefixed_instance_name(const char *gen_prefix, const char *name)
+{
+  StrBuf sb;
+
+  sb_init(&sb);
+  if (gen_prefix != NULL) {
+    sb_append(&sb, gen_prefix);
+  }
+  sb_append(&sb, name);
+  return sb_take(&sb);
+}
+
+static ParamBinding *param_push_temp(const ParamBinding *params,
+                                     const char *name,
+                                     int value)
+{
+  ParamBinding *node;
+
+  node = (ParamBinding *)xmalloc(sizeof(ParamBinding));
+  node->name = vlog_strdup(name);
+  node->value = value;
+  node->next = (ParamBinding *)params;
+  return node;
+}
+
+static void param_pop_temp(ParamBinding *node)
+{
+  if (node == NULL) {
+    return;
+  }
+  free(node->name);
+  free(node);
+}
+
+static int process_generate_list(const ElabContext *ctx,
+                                 const VlogGenerate *items,
+                                 const ModuleStack *stack,
+                                 const char *gen_prefix);
+
+static int process_generate_for(const ElabContext *ctx,
+                                const VlogGenerate *item,
+                                const ModuleStack *stack,
+                                const char *gen_prefix)
+{
+  int value;
+  int limit;
+  int step;
+  int guard;
+
+  if (!eval_int_expr(ctx->params,
+                     item->init_expr,
+                     &value,
+                     ctx->error,
+                     ctx->error_size) ||
+      !eval_int_expr(ctx->params,
+                     item->limit_expr,
+                     &limit,
+                     ctx->error,
+                     ctx->error_size) ||
+      !eval_int_expr(ctx->params,
+                     item->step_expr,
+                     &step,
+                     ctx->error,
+                     ctx->error_size)) {
+    return 0;
+  }
+  if (step <= 0) {
+    set_error(ctx->error,
+              ctx->error_size,
+              "line %d: generate for step must be positive before applying its sign",
+              item->line);
+    return 0;
+  }
+  step *= item->step_sign < 0 ? -1 : 1;
+  if (step == 0) {
+    set_error(ctx->error, ctx->error_size, "line %d: generate for step is zero", item->line);
+    return 0;
+  }
+
+  guard = 0;
+  while (gen_cmp_holds(item->cmp, value, limit)) {
+    ParamBinding *genvar_binding;
+    ElabContext loop_ctx;
+    char *iter_prefix;
+    int ok;
+
+    if (++guard > 10000) {
+      set_error(ctx->error,
+                ctx->error_size,
+                "line %d: generate for appears not to converge",
+                item->line);
+      return 0;
+    }
+
+    genvar_binding = param_push_temp(ctx->params, item->genvar, value);
+    loop_ctx = *ctx;
+    loop_ctx.params = genvar_binding;
+    iter_prefix = gen_iteration_prefix(gen_prefix, item->block_name, value);
+    ok = process_generate_list(&loop_ctx, item->body, stack, iter_prefix);
+    free(iter_prefix);
+    param_pop_temp(genvar_binding);
+    if (!ok) {
+      return 0;
+    }
+    value += step;
+  }
+  return 1;
+}
+
+static int process_generate_list(const ElabContext *ctx,
+                                 const VlogGenerate *items,
+                                 const ModuleStack *stack,
+                                 const char *gen_prefix)
+{
+  const VlogGenerate *item;
+
+  for (item = items; item != NULL; item = item->next) {
+    if (item->kind == VLOG_GEN_ASSIGN) {
+      VlogRef target;
+      VlogExpr *expr;
+
+      if (!rewrite_lvalue_ref(ctx, &item->target, item->line, &target)) {
+        return 0;
+      }
+      expr = rewrite_expr(ctx, item->expr);
+      if (expr == NULL) {
+        vlog_ref_free(&target);
+        return 0;
+      }
+      vlog_module_add_assign(ctx->flat, target, expr, item->line);
+    } else if (item->kind == VLOG_GEN_INSTANCE) {
+      VlogInstance instance;
+      char *name;
+      int ok;
+
+      name = gen_prefixed_instance_name(gen_prefix, item->instance_name);
+      instance.module_name = item->module_name;
+      instance.name = name;
+      instance.param_overrides = item->param_overrides;
+      instance.conns = item->conns;
+      instance.line = item->line;
+      instance.next = NULL;
+      ok = inline_instance(ctx, &instance, stack);
+      free(name);
+      if (!ok) {
+        return 0;
+      }
+    } else if (item->kind == VLOG_GEN_FOR) {
+      if (!process_generate_for(ctx, item, stack, gen_prefix)) {
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
 static int inline_instances(const ElabContext *ctx, const ModuleStack *stack)
 {
   const VlogInstance *instance;
@@ -1240,6 +1525,9 @@ static int inline_module(const ElabContext *ctx, const ModuleStack *stack)
     return 0;
   }
   if (!copy_reg_drivers(ctx)) {
+    return 0;
+  }
+  if (!process_generate_list(ctx, ctx->module->generates, &node, "")) {
     return 0;
   }
   return inline_instances(ctx, &node);

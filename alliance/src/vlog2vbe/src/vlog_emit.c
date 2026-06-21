@@ -527,7 +527,19 @@ static int number_width(const char *text)
 
   quote = strchr(text, '\'');
   if (quote == NULL) {
-    return 1;
+    unsigned long value;
+    int bits;
+
+    value = strtoul(text, &endptr, 10);
+    if (*endptr != '\0') {
+      return 1;
+    }
+    bits = 1;
+    while (value > 1) {
+      value >>= 1;
+      bits++;
+    }
+    return bits;
   }
 
   width = 0;
@@ -574,6 +586,8 @@ static int expr_width(const VlogModule *module, const VlogExpr *expr)
 {
   int width;
   const VlogExprList *item;
+  int left_width;
+  int right_width;
 
   if (expr == NULL) {
     return 1;
@@ -592,6 +606,11 @@ static int expr_width(const VlogModule *module, const VlogExpr *expr)
     if (expr->op == VLOG_OP_EQ || expr->op == VLOG_OP_NE) {
       return 1;
     }
+    if (expr->op == VLOG_OP_MUL) {
+      left_width = expr_width(module, expr->left);
+      right_width = expr_width(module, expr->right);
+      return left_width + right_width;
+    }
     return max_int(expr_width(module, expr->left),
                    expr_width(module, expr->right));
   }
@@ -607,6 +626,32 @@ static int expr_width(const VlogModule *module, const VlogExpr *expr)
     return width == 0 ? 1 : width;
   }
   return 1;
+}
+
+static int expr_contains_arith(const VlogExpr *expr)
+{
+  const VlogExprList *item;
+
+  if (expr == NULL) {
+    return 0;
+  }
+  if (expr->kind == VLOG_EXPR_BINARY &&
+      (expr->op == VLOG_OP_ADD ||
+       expr->op == VLOG_OP_SUB ||
+       expr->op == VLOG_OP_MUL)) {
+    return 1;
+  }
+  if (expr_contains_arith(expr->left) ||
+      expr_contains_arith(expr->right) ||
+      expr_contains_arith(expr->third)) {
+    return 1;
+  }
+  for (item = expr->items; item != NULL; item = item->next) {
+    if (expr_contains_arith(item->expr)) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int expr_contains_ternary(const VlogExpr *expr)
@@ -803,6 +848,339 @@ static char *emit_const_bit(const VlogExpr *expr,
   return vlog_strdup(text);
 }
 
+static int is_vbe_zero(const char *text)
+{
+  return strcmp(text, "'0'") == 0;
+}
+
+static int is_vbe_one(const char *text)
+{
+  return strcmp(text, "'1'") == 0;
+}
+
+static char *emit_not_text(char *value)
+{
+  StrBuf sb;
+
+  if (is_vbe_zero(value)) {
+    free(value);
+    return vlog_strdup("'1'");
+  }
+  if (is_vbe_one(value)) {
+    free(value);
+    return vlog_strdup("'0'");
+  }
+  sb_init(&sb);
+  sb_appendf(&sb, "(not %s)", value);
+  free(value);
+  return sb_take(&sb);
+}
+
+static char *emit_xor2_text(const char *left, const char *right)
+{
+  StrBuf sb;
+
+  if (is_vbe_zero(left)) return vlog_strdup(right);
+  if (is_vbe_zero(right)) return vlog_strdup(left);
+  if (is_vbe_one(left)) {
+    char *copy;
+    copy = vlog_strdup(right);
+    return emit_not_text(copy);
+  }
+  if (is_vbe_one(right)) {
+    char *copy;
+    copy = vlog_strdup(left);
+    return emit_not_text(copy);
+  }
+  sb_init(&sb);
+  sb_appendf(&sb, "(%s xor %s)", left, right);
+  return sb_take(&sb);
+}
+
+static char *emit_xor3_text(const char *left, const char *right, const char *carry)
+{
+  char *partial;
+  char *out;
+
+  partial = emit_xor2_text(left, right);
+  out = emit_xor2_text(partial, carry);
+  free(partial);
+  return out;
+}
+
+static char *emit_majority_text(const char *left, const char *right, const char *carry)
+{
+  StrBuf sb;
+
+  if (is_vbe_zero(carry)) {
+    if (is_vbe_zero(left) || is_vbe_zero(right)) return vlog_strdup("'0'");
+    if (is_vbe_one(left)) return vlog_strdup(right);
+    if (is_vbe_one(right)) return vlog_strdup(left);
+    sb_init(&sb);
+    sb_appendf(&sb, "(%s and %s)", left, right);
+    return sb_take(&sb);
+  }
+  if (is_vbe_one(carry)) {
+    if (is_vbe_one(left) || is_vbe_one(right)) return vlog_strdup("'1'");
+    if (is_vbe_zero(left)) return vlog_strdup(right);
+    if (is_vbe_zero(right)) return vlog_strdup(left);
+    sb_init(&sb);
+    sb_appendf(&sb, "(%s or %s)", left, right);
+    return sb_take(&sb);
+  }
+
+  sb_init(&sb);
+  sb_appendf(&sb,
+             "((%s and %s) or (%s and %s) or (%s and %s))",
+             left,
+             right,
+             left,
+             carry,
+             right,
+             carry);
+  return sb_take(&sb);
+}
+
+static char *emit_addsub_bit(const VlogModule *module,
+                             const VlogExpr *left_expr,
+                             const VlogExpr *right_expr,
+                             int subtract,
+                             int bit_index,
+                             char *error,
+                             unsigned int error_size)
+{
+  char *carry;
+  int i;
+
+  carry = vlog_strdup(subtract ? "'1'" : "'0'");
+  for (i = 0; i < bit_index; i++) {
+    char *left;
+    char *right;
+    char *next_carry;
+
+    left = emit_expr_bit(module, left_expr, i, error, error_size);
+    if (left == NULL) {
+      free(carry);
+      return NULL;
+    }
+    right = emit_expr_bit(module, right_expr, i, error, error_size);
+    if (right == NULL) {
+      free(left);
+      free(carry);
+      return NULL;
+    }
+    if (subtract) {
+      right = emit_not_text(right);
+    }
+    next_carry = emit_majority_text(left, right, carry);
+    free(left);
+    free(right);
+    free(carry);
+    carry = next_carry;
+  }
+
+  {
+    char *left;
+    char *right;
+    char *sum;
+
+    left = emit_expr_bit(module, left_expr, bit_index, error, error_size);
+    if (left == NULL) {
+      free(carry);
+      return NULL;
+    }
+    right = emit_expr_bit(module, right_expr, bit_index, error, error_size);
+    if (right == NULL) {
+      free(left);
+      free(carry);
+      return NULL;
+    }
+    if (subtract) {
+      right = emit_not_text(right);
+    }
+    sum = emit_xor3_text(left, right, carry);
+    free(left);
+    free(right);
+    free(carry);
+    return sum;
+  }
+}
+
+static char *emit_mul_row_bit(const VlogModule *module,
+                              const VlogExpr *left_expr,
+                              const VlogExpr *right_expr,
+                              int row,
+                              int bit_index,
+                              char *error,
+                              unsigned int error_size)
+{
+  int left_width;
+  int right_width;
+  char *left;
+  char *right;
+  StrBuf sb;
+
+  left_width = expr_width(module, left_expr);
+  right_width = expr_width(module, right_expr);
+  if (row < 0 || row >= right_width ||
+      bit_index < row ||
+      bit_index - row >= left_width) {
+    return vlog_strdup("'0'");
+  }
+
+  left = emit_expr_bit(module, left_expr, bit_index - row, error, error_size);
+  if (left == NULL) {
+    return NULL;
+  }
+  right = emit_expr_bit(module, right_expr, row, error, error_size);
+  if (right == NULL) {
+    free(left);
+    return NULL;
+  }
+  if (is_vbe_zero(left) || is_vbe_zero(right)) {
+    free(left);
+    free(right);
+    return vlog_strdup("'0'");
+  }
+  if (is_vbe_one(left)) {
+    free(left);
+    return right;
+  }
+  if (is_vbe_one(right)) {
+    free(right);
+    return left;
+  }
+  sb_init(&sb);
+  sb_appendf(&sb, "(%s and %s)", left, right);
+  free(left);
+  free(right);
+  return sb_take(&sb);
+}
+
+static char *emit_mul_sum_bit(const VlogModule *module,
+                              const VlogExpr *left_expr,
+                              const VlogExpr *right_expr,
+                              int row,
+                              int bit_index,
+                              char *error,
+                              unsigned int error_size);
+
+static char *emit_mul_carry_bit(const VlogModule *module,
+                                const VlogExpr *left_expr,
+                                const VlogExpr *right_expr,
+                                int row,
+                                int bit_index,
+                                char *error,
+                                unsigned int error_size)
+{
+  char *left;
+  char *right;
+  char *carry;
+  char *out;
+
+  if (bit_index <= 0) {
+    return vlog_strdup("'0'");
+  }
+
+  left = emit_mul_sum_bit(module,
+                          left_expr,
+                          right_expr,
+                          row - 1,
+                          bit_index - 1,
+                          error,
+                          error_size);
+  if (left == NULL) return NULL;
+  right = emit_mul_row_bit(module,
+                           left_expr,
+                           right_expr,
+                           row,
+                           bit_index - 1,
+                           error,
+                           error_size);
+  if (right == NULL) {
+    free(left);
+    return NULL;
+  }
+  carry = emit_mul_carry_bit(module,
+                             left_expr,
+                             right_expr,
+                             row,
+                             bit_index - 1,
+                             error,
+                             error_size);
+  if (carry == NULL) {
+    free(left);
+    free(right);
+    return NULL;
+  }
+  out = emit_majority_text(left, right, carry);
+  free(left);
+  free(right);
+  free(carry);
+  return out;
+}
+
+static char *emit_mul_sum_bit(const VlogModule *module,
+                              const VlogExpr *left_expr,
+                              const VlogExpr *right_expr,
+                              int row,
+                              int bit_index,
+                              char *error,
+                              unsigned int error_size)
+{
+  char *left;
+  char *right;
+  char *carry;
+  char *out;
+
+  if (row <= 0) {
+    return emit_mul_row_bit(module,
+                            left_expr,
+                            right_expr,
+                            0,
+                            bit_index,
+                            error,
+                            error_size);
+  }
+
+  left = emit_mul_sum_bit(module,
+                          left_expr,
+                          right_expr,
+                          row - 1,
+                          bit_index,
+                          error,
+                          error_size);
+  if (left == NULL) return NULL;
+  right = emit_mul_row_bit(module,
+                           left_expr,
+                           right_expr,
+                           row,
+                           bit_index,
+                           error,
+                           error_size);
+  if (right == NULL) {
+    free(left);
+    return NULL;
+  }
+  carry = emit_mul_carry_bit(module,
+                             left_expr,
+                             right_expr,
+                             row,
+                             bit_index,
+                             error,
+                             error_size);
+  if (carry == NULL) {
+    free(left);
+    free(right);
+    return NULL;
+  }
+  out = emit_xor3_text(left, right, carry);
+  free(left);
+  free(right);
+  free(carry);
+  return out;
+}
+
 static char *emit_expr_bit(const VlogModule *module,
                            const VlogExpr *expr,
                            int bit_index,
@@ -846,6 +1224,33 @@ static char *emit_expr_bit(const VlogModule *module,
                                 expr->op == VLOG_OP_NE,
                                 error,
                                 error_size);
+    }
+    if (expr->op == VLOG_OP_ADD || expr->op == VLOG_OP_SUB) {
+      return emit_addsub_bit(module,
+                             expr->left,
+                             expr->right,
+                             expr->op == VLOG_OP_SUB,
+                             bit_index,
+                             error,
+                             error_size);
+    }
+    if (expr->op == VLOG_OP_MUL) {
+      int right_width;
+
+      right_width = expr_width(module, expr->right);
+      if (right_width > 8) {
+        set_error(error,
+                  error_size,
+                  "multiplication wider than 8 multiplier bits is too large for this first RTL arithmetic emitter");
+        return NULL;
+      }
+      return emit_mul_sum_bit(module,
+                              expr->left,
+                              expr->right,
+                              right_width - 1,
+                              bit_index,
+                              error,
+                              error_size);
     }
 
     left = emit_expr_bit(module, expr->left, bit_index, error, error_size);
@@ -963,6 +1368,17 @@ static char *emit_expr(const VlogModule *module,
                                 expr->op == VLOG_OP_NE,
                                 error,
                                 error_size);
+    }
+    if (expr->op == VLOG_OP_ADD ||
+        expr->op == VLOG_OP_SUB ||
+        expr->op == VLOG_OP_MUL) {
+      if (expr_width(module, expr) <= 1) {
+        return emit_expr_bit(module, expr, 0, error, error_size);
+      }
+      set_error(error,
+                error_size,
+                "arithmetic expression must be emitted through bit assignments");
+      return NULL;
     }
 
     left = emit_expr(module, expr->left, error, error_size);
@@ -1194,7 +1610,8 @@ static int emit_reg_driver(FILE *out,
 
   if (!driver->target.has_select &&
       target_width > 1 &&
-      expr_contains_ternary(driver->expr)) {
+      (expr_contains_ternary(driver->expr) ||
+       expr_contains_arith(driver->expr))) {
     int i;
 
     for (i = 0; i < target_width; i++) {
@@ -1232,7 +1649,9 @@ static int emit_reg_driver(FILE *out,
   }
 
   target = emit_storage_target(module, &driver->target);
-  expr = emit_expr(module, driver->expr, error, error_size);
+  expr = expr_contains_arith(driver->expr) ?
+    emit_expr_bit(module, driver->expr, 0, error, error_size) :
+    emit_expr(module, driver->expr, error, error_size);
   if (expr == NULL) {
     free(target);
     return 0;
@@ -1499,7 +1918,8 @@ int vlog_emit_vbe_file(const VlogModule *module,
 
     if (!assign->target.has_select &&
         target_width > 1 &&
-        expr_contains_ternary(assign->expr)) {
+        (expr_contains_ternary(assign->expr) ||
+         expr_contains_arith(assign->expr))) {
       int i;
 
       for (i = 0; i < target_width; i++) {
@@ -1525,7 +1945,9 @@ int vlog_emit_vbe_file(const VlogModule *module,
     }
 
     target = emit_ref_raw(&assign->target);
-    expr = emit_expr(module, assign->expr, error, error_size);
+    expr = expr_contains_arith(assign->expr) ?
+      emit_expr_bit(module, assign->expr, 0, error, error_size) :
+      emit_expr(module, assign->expr, error, error_size);
     if (expr == NULL) {
       free(target);
       fclose(out);

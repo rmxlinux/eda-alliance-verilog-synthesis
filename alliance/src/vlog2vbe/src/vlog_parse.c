@@ -30,12 +30,20 @@ enum {
   TOK_POSEDGE,
   TOK_NEGEDGE,
   TOK_PARAMETER,
+  TOK_LOCALPARAM,
+  TOK_GENVAR,
+  TOK_GENERATE,
+  TOK_ENDGENERATE,
+  TOK_FOR,
   TOK_OR,
   TOK_OROR,
   TOK_ANDAND,
   TOK_EQEQ,
   TOK_NEQ,
-  TOK_LE
+  TOK_LE,
+  TOK_GE,
+  TOK_PLUSPLUS,
+  TOK_MINUSMINUS
 };
 
 typedef struct Token {
@@ -283,6 +291,11 @@ static int keyword_type(const char *text)
   if (strcmp(text, "posedge") == 0) return TOK_POSEDGE;
   if (strcmp(text, "negedge") == 0) return TOK_NEGEDGE;
   if (strcmp(text, "parameter") == 0) return TOK_PARAMETER;
+  if (strcmp(text, "localparam") == 0) return TOK_LOCALPARAM;
+  if (strcmp(text, "genvar") == 0) return TOK_GENVAR;
+  if (strcmp(text, "generate") == 0) return TOK_GENERATE;
+  if (strcmp(text, "endgenerate") == 0) return TOK_ENDGENERATE;
+  if (strcmp(text, "for") == 0) return TOK_FOR;
   if (strcmp(text, "or") == 0) return TOK_OR;
   return TOK_IDENT;
 }
@@ -366,6 +379,21 @@ static void lexer_next(Lexer *lexer)
   if (ch == '<' && lexer_peek(lexer) == '=') {
     lexer_get(lexer);
     lexer->tok.type = TOK_LE;
+    return;
+  }
+  if (ch == '>' && lexer_peek(lexer) == '=') {
+    lexer_get(lexer);
+    lexer->tok.type = TOK_GE;
+    return;
+  }
+  if (ch == '+' && lexer_peek(lexer) == '+') {
+    lexer_get(lexer);
+    lexer->tok.type = TOK_PLUSPLUS;
+    return;
+  }
+  if (ch == '-' && lexer_peek(lexer) == '-') {
+    lexer_get(lexer);
+    lexer->tok.type = TOK_MINUSMINUS;
     return;
   }
 
@@ -742,7 +770,7 @@ static void parse_optional_parameter_type(Parser *parser)
   }
 }
 
-static int parse_parameter_assignment(Parser *parser)
+static int parse_parameter_assignment(Parser *parser, int is_local)
 {
   char *name;
   VlogIntExpr *expr;
@@ -762,20 +790,28 @@ static int parse_parameter_assignment(Parser *parser)
     free(name);
     return 0;
   }
-  vlog_module_add_param(parser->module, name, expr, line);
+  vlog_module_add_param(parser->module, name, expr, is_local, line);
   free(name);
   return 1;
 }
 
 static int parse_parameter_declaration(Parser *parser)
 {
-  if (!parser_expect(parser, TOK_PARAMETER, "'parameter'")) {
+  int is_local;
+
+  is_local = 0;
+  if (parser_accept(parser, TOK_PARAMETER)) {
+    is_local = 0;
+  } else if (parser_accept(parser, TOK_LOCALPARAM)) {
+    is_local = 1;
+  } else {
+    parser_error(parser, "expected 'parameter' or 'localparam'");
     return 0;
   }
   parse_optional_parameter_type(parser);
 
   while (!parser->failed) {
-    if (!parse_parameter_assignment(parser)) {
+    if (!parse_parameter_assignment(parser, is_local)) {
       return 0;
     }
     if (parser_accept(parser, ',')) {
@@ -802,7 +838,7 @@ static int parse_parameter_port_list(Parser *parser)
     if (parser_accept(parser, TOK_PARAMETER)) {
       parse_optional_parameter_type(parser);
     }
-    if (!parse_parameter_assignment(parser)) {
+    if (!parse_parameter_assignment(parser, 0)) {
       return 0;
     }
     if (parser_accept(parser, ',')) {
@@ -915,6 +951,15 @@ static VlogExpr *parse_unary(Parser *parser)
     if (child == NULL) return NULL;
     return vlog_expr_unary(VLOG_OP_NOT, child, line);
   }
+  if (parser_accept(parser, '+')) {
+    return parse_unary(parser);
+  }
+  if (parser_accept(parser, '-')) {
+    VlogExpr *child;
+    child = parse_unary(parser);
+    if (child == NULL) return NULL;
+    return vlog_expr_binary(VLOG_OP_SUB, vlog_expr_const("0", line), child, line);
+  }
   return parse_primary(parser);
 }
 
@@ -963,11 +1008,25 @@ static VlogExpr *parse_binary_level(Parser *parser,
   return left;
 }
 
+static VlogExpr *parse_multiply(Parser *parser)
+{
+  static const int tokens[] = {'*'};
+  static const VlogOp ops[] = {VLOG_OP_MUL};
+  return parse_binary_level(parser, parse_unary, tokens, ops, 1);
+}
+
+static VlogExpr *parse_additive(Parser *parser)
+{
+  static const int tokens[] = {'+', '-'};
+  static const VlogOp ops[] = {VLOG_OP_ADD, VLOG_OP_SUB};
+  return parse_binary_level(parser, parse_multiply, tokens, ops, 2);
+}
+
 static VlogExpr *parse_bitwise_and(Parser *parser)
 {
   static const int tokens[] = {'&'};
   static const VlogOp ops[] = {VLOG_OP_AND};
-  return parse_binary_level(parser, parse_unary, tokens, ops, 1);
+  return parse_binary_level(parser, parse_additive, tokens, ops, 1);
 }
 
 static VlogExpr *parse_bitwise_xor(Parser *parser)
@@ -2474,6 +2533,356 @@ static int parse_parameter_overrides(Parser *parser, VlogParamOverride **overrid
   return 0;
 }
 
+static int parse_generate_item(Parser *parser, VlogGenerate **items);
+
+static int parse_generate_assign(Parser *parser, VlogGenerate **items)
+{
+  VlogRef target;
+  VlogExpr *expr;
+  int line;
+
+  line = parser->lexer.tok.line;
+  lexer_next(&parser->lexer);
+
+  if (!parse_ref(parser, &target)) {
+    return 0;
+  }
+  if (!parser_expect(parser, '=', "'=' in generate assignment")) {
+    vlog_ref_free(&target);
+    return 0;
+  }
+  expr = parse_expr(parser);
+  if (expr == NULL) {
+    vlog_ref_free(&target);
+    return 0;
+  }
+  if (!parser_expect(parser, ';', "';' after generate assignment")) {
+    vlog_ref_free(&target);
+    vlog_expr_free(expr);
+    return 0;
+  }
+
+  *items = vlog_generate_append_assign(*items, target, expr, line);
+  return 1;
+}
+
+static int parse_generate_instance(Parser *parser, VlogGenerate **items)
+{
+  char *module_name;
+  VlogParamOverride *param_overrides;
+  int line;
+
+  line = parser->lexer.tok.line;
+  module_name = parse_identifier(parser, "instantiated module name");
+  if (module_name == NULL) {
+    return 0;
+  }
+
+  param_overrides = NULL;
+  if (parser->lexer.tok.type == '#') {
+    if (!parse_parameter_overrides(parser, &param_overrides)) {
+      free(module_name);
+      return 0;
+    }
+  }
+
+  while (!parser->failed) {
+    char *instance_name;
+    VlogConn *conns;
+
+    instance_name = parse_identifier(parser, "instance name");
+    if (instance_name == NULL) {
+      vlog_param_override_free(param_overrides);
+      free(module_name);
+      return 0;
+    }
+
+    conns = NULL;
+    if (!parse_instance_connections(parser, &conns)) {
+      vlog_param_override_free(param_overrides);
+      free(module_name);
+      free(instance_name);
+      return 0;
+    }
+
+    *items = vlog_generate_append_instance(*items,
+                                           module_name,
+                                           instance_name,
+                                           vlog_param_override_clone(param_overrides),
+                                           conns,
+                                           line);
+    free(instance_name);
+
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    vlog_param_override_free(param_overrides);
+    free(module_name);
+    return parser_expect(parser, ';', "';' after generate instance");
+  }
+
+  vlog_param_override_free(param_overrides);
+  free(module_name);
+  return 0;
+}
+
+static int parse_generate_block(Parser *parser,
+                                char **block_name,
+                                VlogGenerate **body)
+{
+  *block_name = NULL;
+  *body = NULL;
+
+  if (!parser_expect(parser, TOK_BEGIN, "'begin' in generate block")) {
+    return 0;
+  }
+  if (parser_accept(parser, ':')) {
+    *block_name = parse_identifier(parser, "generate block name");
+    if (*block_name == NULL) {
+      return 0;
+    }
+  }
+
+  while (!parser->failed && parser->lexer.tok.type != TOK_END) {
+    if (parser->lexer.tok.type == TOK_EOF) {
+      parser_error(parser, "unexpected end of file inside generate block");
+      vlog_generate_free(*body);
+      *body = NULL;
+      free(*block_name);
+      *block_name = NULL;
+      return 0;
+    }
+    if (!parse_generate_item(parser, body)) {
+      vlog_generate_free(*body);
+      *body = NULL;
+      free(*block_name);
+      *block_name = NULL;
+      return 0;
+    }
+  }
+
+  if (!parser_expect(parser, TOK_END, "'end' after generate block")) {
+    vlog_generate_free(*body);
+    *body = NULL;
+    free(*block_name);
+    *block_name = NULL;
+    return 0;
+  }
+  return 1;
+}
+
+static int parse_generate_update(Parser *parser,
+                                 const char *genvar,
+                                 int *step_sign,
+                                 VlogIntExpr **step_expr)
+{
+  char *name;
+  int line;
+
+  *step_sign = 1;
+  *step_expr = NULL;
+  line = parser->lexer.tok.line;
+  name = parse_identifier(parser, "genvar in generate update");
+  if (name == NULL) {
+    return 0;
+  }
+  if (strcmp(name, genvar) != 0) {
+    parser_error_at(parser, line, "generate update uses a different genvar");
+    free(name);
+    return 0;
+  }
+  free(name);
+
+  if (parser_accept(parser, TOK_PLUSPLUS)) {
+    *step_sign = 1;
+    *step_expr = vlog_int_expr_const(1, line);
+    return 1;
+  }
+  if (parser_accept(parser, TOK_MINUSMINUS)) {
+    *step_sign = -1;
+    *step_expr = vlog_int_expr_const(1, line);
+    return 1;
+  }
+
+  if (!parser_expect(parser, '=', "'=' in generate update")) {
+    return 0;
+  }
+  name = parse_identifier(parser, "genvar in generate update expression");
+  if (name == NULL) {
+    return 0;
+  }
+  if (strcmp(name, genvar) != 0) {
+    parser_error_at(parser, line, "generate update expression uses a different genvar");
+    free(name);
+    return 0;
+  }
+  free(name);
+
+  if (parser_accept(parser, '+')) {
+    *step_sign = 1;
+  } else if (parser_accept(parser, '-')) {
+    *step_sign = -1;
+  } else {
+    parser_error(parser, "expected '+' or '-' in generate update");
+    return 0;
+  }
+
+  *step_expr = parse_int_expr(parser);
+  return *step_expr != NULL;
+}
+
+static int parse_generate_for(Parser *parser, VlogGenerate **items)
+{
+  char *genvar;
+  char *cond_name;
+  char *block_name;
+  VlogIntExpr *init_expr;
+  VlogIntExpr *limit_expr;
+  VlogIntExpr *step_expr;
+  VlogGenerate *body;
+  VlogGenCmp cmp;
+  int step_sign;
+  int line;
+
+  line = parser->lexer.tok.line;
+  genvar = NULL;
+  cond_name = NULL;
+  block_name = NULL;
+  init_expr = NULL;
+  limit_expr = NULL;
+  step_expr = NULL;
+  body = NULL;
+  cmp = VLOG_GEN_CMP_LT;
+  step_sign = 1;
+
+  if (!parser_expect(parser, TOK_FOR, "'for' in generate")) return 0;
+  if (!parser_expect(parser, '(', "'(' after generate for")) return 0;
+  genvar = parse_identifier(parser, "genvar name");
+  if (genvar == NULL) goto fail;
+  if (!parser_expect(parser, '=', "'=' in generate for init")) goto fail;
+  init_expr = parse_int_expr(parser);
+  if (init_expr == NULL) goto fail;
+  if (!parser_expect(parser, ';', "';' after generate for init")) goto fail;
+
+  cond_name = parse_identifier(parser, "genvar in generate condition");
+  if (cond_name == NULL) goto fail;
+  if (strcmp(cond_name, genvar) != 0) {
+    parser_error_at(parser, line, "generate condition uses a different genvar");
+    goto fail;
+  }
+  if (parser_accept(parser, '<')) {
+    cmp = VLOG_GEN_CMP_LT;
+  } else if (parser_accept(parser, TOK_LE)) {
+    cmp = VLOG_GEN_CMP_LE;
+  } else if (parser_accept(parser, '>')) {
+    cmp = VLOG_GEN_CMP_GT;
+  } else if (parser_accept(parser, TOK_GE)) {
+    cmp = VLOG_GEN_CMP_GE;
+  } else {
+    parser_error(parser, "expected comparison operator in generate for");
+    goto fail;
+  }
+  limit_expr = parse_int_expr(parser);
+  if (limit_expr == NULL) goto fail;
+  if (!parser_expect(parser, ';', "';' after generate for condition")) goto fail;
+  if (!parse_generate_update(parser, genvar, &step_sign, &step_expr)) goto fail;
+  if (!parser_expect(parser, ')', "')' after generate for update")) goto fail;
+
+  if (parser->lexer.tok.type == TOK_BEGIN) {
+    if (!parse_generate_block(parser, &block_name, &body)) goto fail;
+  } else {
+    if (!parse_generate_item(parser, &body)) goto fail;
+  }
+
+  *items = vlog_generate_append_for(*items,
+                                    genvar,
+                                    init_expr,
+                                    cmp,
+                                    limit_expr,
+                                    step_sign,
+                                    step_expr,
+                                    block_name,
+                                    body,
+                                    line);
+  free(genvar);
+  free(cond_name);
+  free(block_name);
+  return 1;
+
+fail:
+  free(genvar);
+  free(cond_name);
+  free(block_name);
+  vlog_int_expr_free(init_expr);
+  vlog_int_expr_free(limit_expr);
+  vlog_int_expr_free(step_expr);
+  vlog_generate_free(body);
+  return 0;
+}
+
+static int parse_generate_item(Parser *parser, VlogGenerate **items)
+{
+  if (parser->lexer.tok.type == TOK_ASSIGN) {
+    return parse_generate_assign(parser, items);
+  }
+  if (parser->lexer.tok.type == TOK_FOR) {
+    return parse_generate_for(parser, items);
+  }
+  if (parser->lexer.tok.type == TOK_IDENT) {
+    return parse_generate_instance(parser, items);
+  }
+  parser_error(parser, "unsupported generate item");
+  return 0;
+}
+
+static int parse_genvar_declaration(Parser *parser)
+{
+  if (!parser_expect(parser, TOK_GENVAR, "'genvar'")) {
+    return 0;
+  }
+  while (!parser->failed) {
+    char *name;
+
+    name = parse_identifier(parser, "genvar name");
+    if (name == NULL) {
+      return 0;
+    }
+    free(name);
+    if (parser_accept(parser, ',')) {
+      continue;
+    }
+    return parser_expect(parser, ';', "';' after genvar declaration");
+  }
+  return 0;
+}
+
+static int parse_generate_region(Parser *parser)
+{
+  VlogGenerate *items;
+
+  items = NULL;
+  if (!parser_expect(parser, TOK_GENERATE, "'generate'")) {
+    return 0;
+  }
+  while (!parser->failed && parser->lexer.tok.type != TOK_ENDGENERATE) {
+    if (parser->lexer.tok.type == TOK_EOF) {
+      parser_error(parser, "unexpected end of file inside generate region");
+      vlog_generate_free(items);
+      return 0;
+    }
+    if (!parse_generate_item(parser, &items)) {
+      vlog_generate_free(items);
+      return 0;
+    }
+  }
+  if (!parser_expect(parser, TOK_ENDGENERATE, "'endgenerate'")) {
+    vlog_generate_free(items);
+    return 0;
+  }
+  vlog_module_add_generate(parser->module, items);
+  return 1;
+}
+
 static int parse_instance(Parser *parser)
 {
   char *module_name;
@@ -2560,8 +2969,18 @@ static int parse_module(Parser *parser)
         parser->lexer.tok.type == TOK_WIRE ||
         parser->lexer.tok.type == TOK_REG) {
       if (!parse_declaration(parser)) return 0;
-    } else if (parser->lexer.tok.type == TOK_PARAMETER) {
+    } else if (parser->lexer.tok.type == TOK_PARAMETER ||
+               parser->lexer.tok.type == TOK_LOCALPARAM) {
       if (!parse_parameter_declaration(parser)) return 0;
+    } else if (parser->lexer.tok.type == TOK_GENVAR) {
+      if (!parse_genvar_declaration(parser)) return 0;
+    } else if (parser->lexer.tok.type == TOK_GENERATE) {
+      if (!parse_generate_region(parser)) return 0;
+    } else if (parser->lexer.tok.type == TOK_FOR) {
+      VlogGenerate *items;
+      items = NULL;
+      if (!parse_generate_for(parser, &items)) return 0;
+      vlog_module_add_generate(parser->module, items);
     } else if (parser->lexer.tok.type == TOK_ASSIGN) {
       if (!parse_assign(parser)) return 0;
     } else if (parser->lexer.tok.type == TOK_ALWAYS) {

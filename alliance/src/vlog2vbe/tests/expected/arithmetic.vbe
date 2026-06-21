@@ -1,0 +1,30 @@
+ENTITY arithmetic IS
+PORT(
+  a : in BIT_VECTOR(2 downto 0);
+  b : in BIT_VECTOR(2 downto 0);
+  sum : out BIT_VECTOR(2 downto 0);
+  diff : out BIT_VECTOR(2 downto 0);
+  prod : out BIT_VECTOR(3 downto 0);
+  bit0 : out BIT;
+  vdd : in BIT;
+  vss : in BIT
+);
+END arithmetic;
+
+ARCHITECTURE behavior_data_flow OF arithmetic IS
+BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on arithmetic"
+  SEVERITY WARNING;
+  sum(0) <= (a(0) xor b(0));
+  sum(1) <= ((a(1) xor b(1)) xor (a(0) and b(0)));
+  sum(2) <= ((a(2) xor b(2)) xor ((a(1) and b(1)) or (a(1) and (a(0) and b(0))) or (b(1) and (a(0) and b(0)))));
+  diff(0) <= (not (a(0) xor (not b(0))));
+  diff(1) <= ((a(1) xor (not b(1))) xor (a(0) or (not b(0))));
+  diff(2) <= ((a(2) xor (not b(2))) xor ((a(1) and (not b(1))) or (a(1) and (a(0) or (not b(0)))) or ((not b(1)) and (a(0) or (not b(0))))));
+  prod(0) <= (a(0) and b(0));
+  prod(1) <= ((a(1) and b(0)) xor (a(0) and b(1)));
+  prod(2) <= ((a(1) and b(1)) xor ((a(1) and b(0)) and (a(0) and b(1))));
+  prod(3) <= (('0' and (a(1) and b(1))) or ('0' and ((a(1) and b(0)) and (a(0) and b(1)))) or ((a(1) and b(1)) and ((a(1) and b(0)) and (a(0) and b(1)))));
+  bit0 <= (a(0) xor b(0));
+END behavior_data_flow;

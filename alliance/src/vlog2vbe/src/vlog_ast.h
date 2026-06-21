@@ -72,7 +72,10 @@ typedef enum VlogOp {
   VLOG_OP_LOGIC_AND,
   VLOG_OP_LOGIC_OR,
   VLOG_OP_EQ,
-  VLOG_OP_NE
+  VLOG_OP_NE,
+  VLOG_OP_ADD,
+  VLOG_OP_SUB,
+  VLOG_OP_MUL
 } VlogOp;
 
 typedef struct VlogExpr VlogExpr;
@@ -127,6 +130,7 @@ typedef struct VlogConn {
 typedef struct VlogParam {
   char *name;
   VlogIntExpr *expr;
+  int is_local;
   int line;
   struct VlogParam *next;
 } VlogParam;
@@ -158,6 +162,39 @@ typedef struct VlogRegDriver {
   struct VlogRegDriver *next;
 } VlogRegDriver;
 
+typedef enum VlogGenKind {
+  VLOG_GEN_ASSIGN = 0,
+  VLOG_GEN_INSTANCE,
+  VLOG_GEN_FOR
+} VlogGenKind;
+
+typedef enum VlogGenCmp {
+  VLOG_GEN_CMP_LT = 0,
+  VLOG_GEN_CMP_LE,
+  VLOG_GEN_CMP_GT,
+  VLOG_GEN_CMP_GE
+} VlogGenCmp;
+
+typedef struct VlogGenerate {
+  VlogGenKind kind;
+  VlogRef target;
+  VlogExpr *expr;
+  char *module_name;
+  char *instance_name;
+  VlogParamOverride *param_overrides;
+  VlogConn *conns;
+  char *genvar;
+  VlogIntExpr *init_expr;
+  VlogIntExpr *limit_expr;
+  VlogIntExpr *step_expr;
+  int step_sign;
+  VlogGenCmp cmp;
+  char *block_name;
+  struct VlogGenerate *body;
+  int line;
+  struct VlogGenerate *next;
+} VlogGenerate;
+
 typedef struct VlogModule {
   char *name;
   VlogParam *parameters;
@@ -165,6 +202,7 @@ typedef struct VlogModule {
   VlogPort *ports;
   VlogAssign *assigns;
   VlogInstance *instances;
+  VlogGenerate *generates;
   VlogRegDriver *reg_drivers;
   struct VlogModule *next;
 } VlogModule;
@@ -191,6 +229,7 @@ int vlog_module_add_port(VlogModule *module, const char *name);
 int vlog_module_add_param(VlogModule *module,
                           const char *name,
                           VlogIntExpr *expr,
+                          int is_local,
                           int line);
 int vlog_module_update_signal(VlogModule *module,
                               const char *name,
@@ -215,6 +254,27 @@ int vlog_module_add_reg_driver(VlogModule *module,
                                VlogExpr *guard,
                                VlogExpr *expr,
                                int line);
+VlogGenerate *vlog_generate_append_assign(VlogGenerate *list,
+                                          VlogRef target,
+                                          VlogExpr *expr,
+                                          int line);
+VlogGenerate *vlog_generate_append_instance(VlogGenerate *list,
+                                            const char *module_name,
+                                            const char *instance_name,
+                                            VlogParamOverride *param_overrides,
+                                            VlogConn *conns,
+                                            int line);
+VlogGenerate *vlog_generate_append_for(VlogGenerate *list,
+                                       const char *genvar,
+                                       VlogIntExpr *init_expr,
+                                       VlogGenCmp cmp,
+                                       VlogIntExpr *limit_expr,
+                                       int step_sign,
+                                       VlogIntExpr *step_expr,
+                                       const char *block_name,
+                                       VlogGenerate *body,
+                                       int line);
+int vlog_module_add_generate(VlogModule *module, VlogGenerate *items);
 
 char *vlog_strdup(const char *text);
 char *vlog_strndup(const char *text, unsigned int length);
@@ -258,5 +318,6 @@ void vlog_expr_free(VlogExpr *expr);
 void vlog_expr_list_free(VlogExprList *list);
 void vlog_conn_free(VlogConn *conn);
 void vlog_param_override_free(VlogParamOverride *override);
+void vlog_generate_free(VlogGenerate *generate);
 
 #endif

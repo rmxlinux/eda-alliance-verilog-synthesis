@@ -401,21 +401,21 @@ make -C tests VLOG2VBE="${ALLIANCE_TOP}/bin/vlog2vbe" check
 - 边沿触发 `always @(posedge clk)` / `always @(negedge clk)`。
 - 常见异步 reset 模板。
 - 简单 module instance。
-- 整数 `parameter` 声明，以及实例上的命名/位置参数覆盖。
+- 整数 `parameter/localparam` 声明，以及实例上的命名/位置参数覆盖。
 - 命名端口连接和位置端口连接。
 - 层次 flatten 到 top module。
+- 静态 `generate for` / `genvar` 展开，循环体支持连续赋值和简单实例。
 - 生成 BOOM 旧 VBE parser 可接受的 flatten 信号名。
 - VBE 自动附加 `vdd`/`vss` 电源端口和 power-supply assertion，方便直接进入 BOOG/LOON。
 - `-top module` 指定 top，以及唯一未被实例化模块的自动 top 推断。
-- 常见布尔表达式、位选、片选、拼接、条件表达式。
+- 常见布尔表达式、位选、片选、拼接、条件表达式，以及 `+/-/*` 普通 RTL 算术。
 
 暂不支持：
 
-- localparam。
-- generate。
+- generate-if / generate-case。
 - delay / specify / UDP / system task。
 - 四态 `x/z` 精确语义。
-- 算术运算符。
+- 普通 RTL 表达式中的除法和取模。
 - output port 连接到复杂表达式。
 - 多驱动 tri-state 总线。
 

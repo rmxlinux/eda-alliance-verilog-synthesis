@@ -79,6 +79,7 @@ void vlog_module_init(VlogModule *module)
   module->ports = NULL;
   module->assigns = NULL;
   module->instances = NULL;
+  module->generates = NULL;
   module->reg_drivers = NULL;
   module->next = NULL;
 }
@@ -216,6 +217,29 @@ static void vlog_instance_free(VlogInstance *instance)
   }
 }
 
+void vlog_generate_free(VlogGenerate *generate)
+{
+  VlogGenerate *next;
+
+  while (generate != NULL) {
+    next = generate->next;
+    vlog_ref_free(&generate->target);
+    vlog_expr_free(generate->expr);
+    free(generate->module_name);
+    free(generate->instance_name);
+    vlog_param_override_free(generate->param_overrides);
+    vlog_conn_free(generate->conns);
+    free(generate->genvar);
+    vlog_int_expr_free(generate->init_expr);
+    vlog_int_expr_free(generate->limit_expr);
+    vlog_int_expr_free(generate->step_expr);
+    free(generate->block_name);
+    vlog_generate_free(generate->body);
+    free(generate);
+    generate = next;
+  }
+}
+
 static void vlog_reg_driver_free(VlogRegDriver *driver)
 {
   VlogRegDriver *next;
@@ -242,6 +266,7 @@ void vlog_module_free(VlogModule *module)
   vlog_port_free(module->ports);
   vlog_assign_free(module->assigns);
   vlog_instance_free(module->instances);
+  vlog_generate_free(module->generates);
   vlog_reg_driver_free(module->reg_drivers);
   vlog_module_init(module);
 }
@@ -340,6 +365,7 @@ int vlog_module_add_port(VlogModule *module, const char *name)
 int vlog_module_add_param(VlogModule *module,
                           const char *name,
                           VlogIntExpr *expr,
+                          int is_local,
                           int line)
 {
   VlogParam *param;
@@ -348,6 +374,7 @@ int vlog_module_add_param(VlogModule *module,
   param = (VlogParam *)vlog_xmalloc(sizeof(VlogParam));
   param->name = vlog_strdup(name);
   param->expr = expr;
+  param->is_local = is_local;
   param->line = line;
   param->next = NULL;
 
@@ -356,6 +383,120 @@ int vlog_module_add_param(VlogModule *module,
     tail = &(*tail)->next;
   }
   *tail = param;
+  return 1;
+}
+
+static VlogGenerate *vlog_generate_alloc(VlogGenKind kind, int line)
+{
+  VlogGenerate *item;
+
+  item = (VlogGenerate *)vlog_xmalloc(sizeof(VlogGenerate));
+  item->kind = kind;
+  item->target.name = NULL;
+  item->target.has_select = 0;
+  item->target.select_msb = 0;
+  item->target.select_lsb = 0;
+  item->target.select_msb_expr = NULL;
+  item->target.select_lsb_expr = NULL;
+  item->expr = NULL;
+  item->module_name = NULL;
+  item->instance_name = NULL;
+  item->param_overrides = NULL;
+  item->conns = NULL;
+  item->genvar = NULL;
+  item->init_expr = NULL;
+  item->limit_expr = NULL;
+  item->step_expr = NULL;
+  item->step_sign = 1;
+  item->cmp = VLOG_GEN_CMP_LT;
+  item->block_name = NULL;
+  item->body = NULL;
+  item->line = line;
+  item->next = NULL;
+  return item;
+}
+
+static VlogGenerate *vlog_generate_append_node(VlogGenerate *list,
+                                               VlogGenerate *node)
+{
+  VlogGenerate **tail;
+
+  tail = &list;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = node;
+  return list;
+}
+
+VlogGenerate *vlog_generate_append_assign(VlogGenerate *list,
+                                          VlogRef target,
+                                          VlogExpr *expr,
+                                          int line)
+{
+  VlogGenerate *item;
+
+  item = vlog_generate_alloc(VLOG_GEN_ASSIGN, line);
+  item->target = target;
+  item->expr = expr;
+  return vlog_generate_append_node(list, item);
+}
+
+VlogGenerate *vlog_generate_append_instance(VlogGenerate *list,
+                                            const char *module_name,
+                                            const char *instance_name,
+                                            VlogParamOverride *param_overrides,
+                                            VlogConn *conns,
+                                            int line)
+{
+  VlogGenerate *item;
+
+  item = vlog_generate_alloc(VLOG_GEN_INSTANCE, line);
+  item->module_name = vlog_strdup(module_name);
+  item->instance_name = vlog_strdup(instance_name);
+  item->param_overrides = param_overrides;
+  item->conns = conns;
+  return vlog_generate_append_node(list, item);
+}
+
+VlogGenerate *vlog_generate_append_for(VlogGenerate *list,
+                                       const char *genvar,
+                                       VlogIntExpr *init_expr,
+                                       VlogGenCmp cmp,
+                                       VlogIntExpr *limit_expr,
+                                       int step_sign,
+                                       VlogIntExpr *step_expr,
+                                       const char *block_name,
+                                       VlogGenerate *body,
+                                       int line)
+{
+  VlogGenerate *item;
+
+  item = vlog_generate_alloc(VLOG_GEN_FOR, line);
+  item->genvar = vlog_strdup(genvar);
+  item->init_expr = init_expr;
+  item->cmp = cmp;
+  item->limit_expr = limit_expr;
+  item->step_sign = step_sign;
+  item->step_expr = step_expr;
+  item->block_name = vlog_strdup(block_name);
+  item->body = body;
+  return vlog_generate_append_node(list, item);
+}
+
+int vlog_module_add_generate(VlogModule *module, VlogGenerate *items)
+{
+  VlogGenerate **tail;
+
+  if (items == NULL) {
+    return 1;
+  }
+
+  tail = &module->generates;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = items;
   return 1;
 }
 
