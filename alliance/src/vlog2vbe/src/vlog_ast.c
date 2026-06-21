@@ -233,10 +233,31 @@ void vlog_generate_free(VlogGenerate *generate)
     vlog_int_expr_free(generate->init_expr);
     vlog_int_expr_free(generate->limit_expr);
     vlog_int_expr_free(generate->step_expr);
+    vlog_int_expr_free(generate->cond_expr);
+    vlog_int_expr_free(generate->case_expr);
     free(generate->block_name);
+    free(generate->else_block_name);
     vlog_generate_free(generate->body);
+    vlog_generate_free(generate->else_body);
+    vlog_gen_case_item_free(generate->case_items);
+    vlog_generate_free(generate->default_body);
+    free(generate->default_block_name);
     free(generate);
     generate = next;
+  }
+}
+
+void vlog_gen_case_item_free(VlogGenCaseItem *item)
+{
+  VlogGenCaseItem *next;
+
+  while (item != NULL) {
+    next = item->next;
+    vlog_int_expr_free(item->label_expr);
+    free(item->block_name);
+    vlog_generate_free(item->body);
+    free(item);
+    item = next;
   }
 }
 
@@ -318,6 +339,7 @@ VlogSignal *vlog_module_ensure_signal(VlogModule *module, const char *name)
   signal->dir = VLOG_DIR_NONE;
   signal->is_port = 0;
   signal->is_reg = 0;
+  signal->is_signed = 0;
   signal->range = vlog_range_none();
   signal->next = NULL;
 
@@ -407,10 +429,17 @@ static VlogGenerate *vlog_generate_alloc(VlogGenKind kind, int line)
   item->init_expr = NULL;
   item->limit_expr = NULL;
   item->step_expr = NULL;
+  item->cond_expr = NULL;
+  item->case_expr = NULL;
   item->step_sign = 1;
   item->cmp = VLOG_GEN_CMP_LT;
   item->block_name = NULL;
+  item->else_block_name = NULL;
   item->body = NULL;
+  item->else_body = NULL;
+  item->case_items = NULL;
+  item->default_body = NULL;
+  item->default_block_name = NULL;
   item->line = line;
   item->next = NULL;
   return item;
@@ -484,6 +513,64 @@ VlogGenerate *vlog_generate_append_for(VlogGenerate *list,
   return vlog_generate_append_node(list, item);
 }
 
+VlogGenerate *vlog_generate_append_if(VlogGenerate *list,
+                                      VlogIntExpr *cond_expr,
+                                      const char *block_name,
+                                      VlogGenerate *body,
+                                      const char *else_block_name,
+                                      VlogGenerate *else_body,
+                                      int line)
+{
+  VlogGenerate *item;
+
+  item = vlog_generate_alloc(VLOG_GEN_IF, line);
+  item->cond_expr = cond_expr;
+  item->block_name = vlog_strdup(block_name);
+  item->body = body;
+  item->else_block_name = vlog_strdup(else_block_name);
+  item->else_body = else_body;
+  return vlog_generate_append_node(list, item);
+}
+
+VlogGenCaseItem *vlog_gen_case_item_append(VlogGenCaseItem *list,
+                                           VlogIntExpr *label_expr,
+                                           const char *block_name,
+                                           VlogGenerate *body)
+{
+  VlogGenCaseItem *item;
+  VlogGenCaseItem **tail;
+
+  item = (VlogGenCaseItem *)vlog_xmalloc(sizeof(VlogGenCaseItem));
+  item->label_expr = label_expr;
+  item->block_name = vlog_strdup(block_name);
+  item->body = body;
+  item->next = NULL;
+
+  tail = &list;
+  while (*tail != NULL) {
+    tail = &(*tail)->next;
+  }
+  *tail = item;
+  return list;
+}
+
+VlogGenerate *vlog_generate_append_case(VlogGenerate *list,
+                                        VlogIntExpr *case_expr,
+                                        VlogGenCaseItem *case_items,
+                                        const char *default_block_name,
+                                        VlogGenerate *default_body,
+                                        int line)
+{
+  VlogGenerate *item;
+
+  item = vlog_generate_alloc(VLOG_GEN_CASE, line);
+  item->case_expr = case_expr;
+  item->case_items = case_items;
+  item->default_block_name = vlog_strdup(default_block_name);
+  item->default_body = default_body;
+  return vlog_generate_append_node(list, item);
+}
+
 int vlog_module_add_generate(VlogModule *module, VlogGenerate *items)
 {
   VlogGenerate **tail;
@@ -505,6 +592,7 @@ int vlog_module_update_signal(VlogModule *module,
                               VlogDir dir,
                               int is_port,
                               int is_reg,
+                              int is_signed,
                               VlogRange range)
 {
   VlogSignal *signal;
@@ -518,6 +606,9 @@ int vlog_module_update_signal(VlogModule *module,
   }
   if (is_reg) {
     signal->is_reg = 1;
+  }
+  if (is_signed) {
+    signal->is_signed = 1;
   }
   if (range.has_range) {
     vlog_range_free(&signal->range);

@@ -766,6 +766,7 @@ static int copy_top_signals(const ElabContext *ctx)
                                 signal->dir,
                                 1,
                                 signal->is_reg,
+                                signal->is_signed,
                                 range);
       vlog_range_free(&range);
     }
@@ -783,6 +784,7 @@ static int copy_top_signals(const ElabContext *ctx)
                                 VLOG_DIR_NONE,
                                 0,
                                 signal->is_reg,
+                                signal->is_signed,
                                 range);
       vlog_range_free(&range);
     }
@@ -832,6 +834,7 @@ static int add_local_child_signals(const ElabContext *ctx)
                                 VLOG_DIR_NONE,
                                 0,
                                 signal->is_reg,
+                                signal->is_signed,
                                 range);
       vlog_range_free(&range);
     }
@@ -1341,6 +1344,20 @@ static char *gen_iteration_prefix(const char *parent_prefix,
   return sb_take(&sb);
 }
 
+static char *gen_named_prefix(const char *parent_prefix, const char *block_name)
+{
+  StrBuf sb;
+
+  sb_init(&sb);
+  if (parent_prefix != NULL) {
+    sb_append(&sb, parent_prefix);
+  }
+  if (block_name != NULL && block_name[0] != '\0') {
+    sb_appendf(&sb, "%s_", block_name);
+  }
+  return sb_take(&sb);
+}
+
 static char *gen_prefixed_instance_name(const char *gen_prefix, const char *name)
 {
   StrBuf sb;
@@ -1450,6 +1467,94 @@ static int process_generate_for(const ElabContext *ctx,
   return 1;
 }
 
+static int process_generate_if(const ElabContext *ctx,
+                               const VlogGenerate *item,
+                               const ModuleStack *stack,
+                               const char *gen_prefix)
+{
+  int cond;
+  const VlogGenerate *body;
+  const char *block_name;
+  char *next_prefix;
+  int ok;
+
+  if (!eval_int_expr(ctx->params,
+                     item->cond_expr,
+                     &cond,
+                     ctx->error,
+                     ctx->error_size)) {
+    return 0;
+  }
+
+  if (cond != 0) {
+    body = item->body;
+    block_name = item->block_name;
+  } else {
+    body = item->else_body;
+    block_name = item->else_block_name;
+  }
+  if (body == NULL) {
+    return 1;
+  }
+
+  next_prefix = gen_named_prefix(gen_prefix, block_name);
+  ok = process_generate_list(ctx, body, stack, next_prefix);
+  free(next_prefix);
+  return ok;
+}
+
+static int process_generate_case(const ElabContext *ctx,
+                                 const VlogGenerate *item,
+                                 const ModuleStack *stack,
+                                 const char *gen_prefix)
+{
+  const VlogGenCaseItem *case_item;
+  const VlogGenerate *body;
+  const char *block_name;
+  char *next_prefix;
+  int selector;
+  int ok;
+
+  if (!eval_int_expr(ctx->params,
+                     item->case_expr,
+                     &selector,
+                     ctx->error,
+                     ctx->error_size)) {
+    return 0;
+  }
+
+  body = NULL;
+  block_name = NULL;
+  for (case_item = item->case_items; case_item != NULL; case_item = case_item->next) {
+    int label;
+
+    if (!eval_int_expr(ctx->params,
+                       case_item->label_expr,
+                       &label,
+                       ctx->error,
+                       ctx->error_size)) {
+      return 0;
+    }
+    if (label == selector) {
+      body = case_item->body;
+      block_name = case_item->block_name;
+      break;
+    }
+  }
+  if (body == NULL) {
+    body = item->default_body;
+    block_name = item->default_block_name;
+  }
+  if (body == NULL) {
+    return 1;
+  }
+
+  next_prefix = gen_named_prefix(gen_prefix, block_name);
+  ok = process_generate_list(ctx, body, stack, next_prefix);
+  free(next_prefix);
+  return ok;
+}
+
 static int process_generate_list(const ElabContext *ctx,
                                  const VlogGenerate *items,
                                  const ModuleStack *stack,
@@ -1490,6 +1595,14 @@ static int process_generate_list(const ElabContext *ctx,
       }
     } else if (item->kind == VLOG_GEN_FOR) {
       if (!process_generate_for(ctx, item, stack, gen_prefix)) {
+        return 0;
+      }
+    } else if (item->kind == VLOG_GEN_IF) {
+      if (!process_generate_if(ctx, item, stack, gen_prefix)) {
+        return 0;
+      }
+    } else if (item->kind == VLOG_GEN_CASE) {
+      if (!process_generate_case(ctx, item, stack, gen_prefix)) {
         return 0;
       }
     }

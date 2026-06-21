@@ -75,7 +75,9 @@ typedef enum VlogOp {
   VLOG_OP_NE,
   VLOG_OP_ADD,
   VLOG_OP_SUB,
-  VLOG_OP_MUL
+  VLOG_OP_MUL,
+  VLOG_OP_DIV,
+  VLOG_OP_MOD
 } VlogOp;
 
 typedef struct VlogExpr VlogExpr;
@@ -103,6 +105,7 @@ typedef struct VlogSignal {
   VlogDir dir;
   int is_port;
   int is_reg;
+  int is_signed;
   VlogRange range;
   struct VlogSignal *next;
 } VlogSignal;
@@ -165,7 +168,9 @@ typedef struct VlogRegDriver {
 typedef enum VlogGenKind {
   VLOG_GEN_ASSIGN = 0,
   VLOG_GEN_INSTANCE,
-  VLOG_GEN_FOR
+  VLOG_GEN_FOR,
+  VLOG_GEN_IF,
+  VLOG_GEN_CASE
 } VlogGenKind;
 
 typedef enum VlogGenCmp {
@@ -174,6 +179,13 @@ typedef enum VlogGenCmp {
   VLOG_GEN_CMP_GT,
   VLOG_GEN_CMP_GE
 } VlogGenCmp;
+
+typedef struct VlogGenCaseItem {
+  VlogIntExpr *label_expr;
+  char *block_name;
+  struct VlogGenerate *body;
+  struct VlogGenCaseItem *next;
+} VlogGenCaseItem;
 
 typedef struct VlogGenerate {
   VlogGenKind kind;
@@ -187,10 +199,17 @@ typedef struct VlogGenerate {
   VlogIntExpr *init_expr;
   VlogIntExpr *limit_expr;
   VlogIntExpr *step_expr;
+  VlogIntExpr *cond_expr;
+  VlogIntExpr *case_expr;
   int step_sign;
   VlogGenCmp cmp;
   char *block_name;
+  char *else_block_name;
   struct VlogGenerate *body;
+  struct VlogGenerate *else_body;
+  VlogGenCaseItem *case_items;
+  struct VlogGenerate *default_body;
+  char *default_block_name;
   int line;
   struct VlogGenerate *next;
 } VlogGenerate;
@@ -236,6 +255,7 @@ int vlog_module_update_signal(VlogModule *module,
                               VlogDir dir,
                               int is_port,
                               int is_reg,
+                              int is_signed,
                               VlogRange range);
 int vlog_module_add_assign(VlogModule *module,
                            VlogRef target,
@@ -274,6 +294,23 @@ VlogGenerate *vlog_generate_append_for(VlogGenerate *list,
                                        const char *block_name,
                                        VlogGenerate *body,
                                        int line);
+VlogGenerate *vlog_generate_append_if(VlogGenerate *list,
+                                      VlogIntExpr *cond_expr,
+                                      const char *block_name,
+                                      VlogGenerate *body,
+                                      const char *else_block_name,
+                                      VlogGenerate *else_body,
+                                      int line);
+VlogGenCaseItem *vlog_gen_case_item_append(VlogGenCaseItem *list,
+                                           VlogIntExpr *label_expr,
+                                           const char *block_name,
+                                           VlogGenerate *body);
+VlogGenerate *vlog_generate_append_case(VlogGenerate *list,
+                                        VlogIntExpr *case_expr,
+                                        VlogGenCaseItem *case_items,
+                                        const char *default_block_name,
+                                        VlogGenerate *default_body,
+                                        int line);
 int vlog_module_add_generate(VlogModule *module, VlogGenerate *items);
 
 char *vlog_strdup(const char *text);
@@ -318,6 +355,7 @@ void vlog_expr_free(VlogExpr *expr);
 void vlog_expr_list_free(VlogExprList *list);
 void vlog_conn_free(VlogConn *conn);
 void vlog_param_override_free(VlogParamOverride *override);
+void vlog_gen_case_item_free(VlogGenCaseItem *item);
 void vlog_generate_free(VlogGenerate *generate);
 
 #endif

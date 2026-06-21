@@ -663,7 +663,7 @@ static int parse_optional_range(Parser *parser, VlogRange *range)
   return 1;
 }
 
-static void parse_optional_type_words(Parser *parser, int *is_reg)
+static void parse_optional_type_words(Parser *parser, int *is_reg, int *is_signed)
 {
   int keep_going;
 
@@ -671,6 +671,7 @@ static void parse_optional_type_words(Parser *parser, int *is_reg)
   while (keep_going) {
     keep_going = 0;
     if (parser_accept(parser, TOK_SIGNED)) {
+      *is_signed = 1;
       keep_going = 1;
     } else if (parser_accept(parser, TOK_WIRE)) {
       keep_going = 1;
@@ -699,11 +700,13 @@ static int parse_port_list(Parser *parser)
   VlogDir current_dir;
   VlogRange current_range;
   int current_is_reg;
+  int current_is_signed;
   int ansi_seen;
 
   current_dir = VLOG_DIR_NONE;
   current_range = vlog_range_none();
   current_is_reg = 0;
+  current_is_signed = 0;
   ansi_seen = 0;
 
   if (parser_accept(parser, ')')) {
@@ -714,31 +717,35 @@ static int parse_port_list(Parser *parser)
     VlogDir dir;
     VlogRange range;
     int is_reg;
+    int is_signed;
     char *name;
 
     dir = VLOG_DIR_NONE;
     range = vlog_range_none();
     is_reg = 0;
+    is_signed = 0;
 
     if (token_is_direction(parser->lexer.tok.type)) {
       dir = token_to_dir(parser->lexer.tok.type);
       lexer_next(&parser->lexer);
-      parse_optional_type_words(parser, &is_reg);
+      parse_optional_type_words(parser, &is_reg, &is_signed);
       if (!parse_optional_range(parser, &range)) return 0;
       current_dir = dir;
       current_range = range;
       current_is_reg = is_reg;
+      current_is_signed = is_signed;
       ansi_seen = 1;
     } else if (ansi_seen && current_dir != VLOG_DIR_NONE) {
       dir = current_dir;
       range = current_range;
       is_reg = current_is_reg;
+      is_signed = current_is_signed;
     }
 
     name = parse_identifier(parser, "port name");
     if (name == NULL) return 0;
     vlog_module_add_port(parser->module, name);
-    vlog_module_update_signal(parser->module, name, dir, 1, is_reg, range);
+    vlog_module_update_signal(parser->module, name, dir, 1, is_reg, is_signed, range);
     free(name);
 
     if (parser_accept(parser, ',')) {
@@ -756,13 +763,15 @@ static void parse_optional_parameter_type(Parser *parser)
 {
   VlogRange ignored_range;
   int ignored_reg;
+  int ignored_signed;
 
   ignored_reg = 0;
+  ignored_signed = 0;
   if (parser->lexer.tok.type == TOK_IDENT &&
       strcmp(parser->lexer.tok.text, "integer") == 0) {
     lexer_next(&parser->lexer);
   }
-  parse_optional_type_words(parser, &ignored_reg);
+  parse_optional_type_words(parser, &ignored_reg, &ignored_signed);
   ignored_range = vlog_range_none();
   if (parser->lexer.tok.type == '[') {
     parse_optional_range(parser, &ignored_range);
@@ -1010,9 +1019,9 @@ static VlogExpr *parse_binary_level(Parser *parser,
 
 static VlogExpr *parse_multiply(Parser *parser)
 {
-  static const int tokens[] = {'*'};
-  static const VlogOp ops[] = {VLOG_OP_MUL};
-  return parse_binary_level(parser, parse_unary, tokens, ops, 1);
+  static const int tokens[] = {'*', '/', '%'};
+  static const VlogOp ops[] = {VLOG_OP_MUL, VLOG_OP_DIV, VLOG_OP_MOD};
+  return parse_binary_level(parser, parse_unary, tokens, ops, 3);
 }
 
 static VlogExpr *parse_additive(Parser *parser)
@@ -2269,9 +2278,11 @@ static int parse_declaration(Parser *parser)
   VlogDir dir;
   VlogRange range;
   int is_reg;
+  int is_signed;
 
   dir = VLOG_DIR_NONE;
   is_reg = 0;
+  is_signed = 0;
   range = vlog_range_none();
 
   if (token_is_direction(parser->lexer.tok.type)) {
@@ -2287,7 +2298,7 @@ static int parse_declaration(Parser *parser)
     return 0;
   }
 
-  parse_optional_type_words(parser, &is_reg);
+  parse_optional_type_words(parser, &is_reg, &is_signed);
   if (!parse_optional_range(parser, &range)) return 0;
 
   while (!parser->failed) {
@@ -2301,6 +2312,7 @@ static int parse_declaration(Parser *parser)
                               dir,
                               dir != VLOG_DIR_NONE,
                               is_reg,
+                              is_signed,
                               range);
     free(name);
 
@@ -2671,6 +2683,18 @@ static int parse_generate_block(Parser *parser,
   return 1;
 }
 
+static int parse_generate_body(Parser *parser,
+                               char **block_name,
+                               VlogGenerate **body)
+{
+  *block_name = NULL;
+  *body = NULL;
+  if (parser->lexer.tok.type == TOK_BEGIN) {
+    return parse_generate_block(parser, block_name, body);
+  }
+  return parse_generate_item(parser, body);
+}
+
 static int parse_generate_update(Parser *parser,
                                  const char *genvar,
                                  int *step_sign,
@@ -2788,11 +2812,7 @@ static int parse_generate_for(Parser *parser, VlogGenerate **items)
   if (!parse_generate_update(parser, genvar, &step_sign, &step_expr)) goto fail;
   if (!parser_expect(parser, ')', "')' after generate for update")) goto fail;
 
-  if (parser->lexer.tok.type == TOK_BEGIN) {
-    if (!parse_generate_block(parser, &block_name, &body)) goto fail;
-  } else {
-    if (!parse_generate_item(parser, &body)) goto fail;
-  }
+  if (!parse_generate_body(parser, &block_name, &body)) goto fail;
 
   *items = vlog_generate_append_for(*items,
                                     genvar,
@@ -2820,6 +2840,128 @@ fail:
   return 0;
 }
 
+static int parse_generate_if(Parser *parser, VlogGenerate **items)
+{
+  VlogIntExpr *cond_expr;
+  VlogGenerate *then_body;
+  VlogGenerate *else_body;
+  char *then_name;
+  char *else_name;
+  int line;
+
+  line = parser->lexer.tok.line;
+  cond_expr = NULL;
+  then_body = NULL;
+  else_body = NULL;
+  then_name = NULL;
+  else_name = NULL;
+
+  if (!parser_expect(parser, TOK_IF, "'if' in generate")) return 0;
+  if (!parser_expect(parser, '(', "'(' after generate if")) return 0;
+  cond_expr = parse_int_expr(parser);
+  if (cond_expr == NULL) goto fail;
+  if (!parser_expect(parser, ')', "')' after generate if condition")) goto fail;
+  if (!parse_generate_body(parser, &then_name, &then_body)) goto fail;
+  if (parser_accept(parser, TOK_ELSE)) {
+    if (!parse_generate_body(parser, &else_name, &else_body)) goto fail;
+  }
+
+  *items = vlog_generate_append_if(*items,
+                                   cond_expr,
+                                   then_name,
+                                   then_body,
+                                   else_name,
+                                   else_body,
+                                   line);
+  free(then_name);
+  free(else_name);
+  return 1;
+
+fail:
+  vlog_int_expr_free(cond_expr);
+  vlog_generate_free(then_body);
+  vlog_generate_free(else_body);
+  free(then_name);
+  free(else_name);
+  return 0;
+}
+
+static int parse_generate_case(Parser *parser, VlogGenerate **items)
+{
+  VlogIntExpr *case_expr;
+  VlogGenCaseItem *case_items;
+  VlogGenerate *default_body;
+  char *default_name;
+  int line;
+
+  line = parser->lexer.tok.line;
+  case_expr = NULL;
+  case_items = NULL;
+  default_body = NULL;
+  default_name = NULL;
+
+  if (!parser_expect(parser, TOK_CASE, "'case' in generate")) return 0;
+  if (!parser_expect(parser, '(', "'(' after generate case")) return 0;
+  case_expr = parse_int_expr(parser);
+  if (case_expr == NULL) goto fail;
+  if (!parser_expect(parser, ')', "')' after generate case expression")) goto fail;
+
+  while (!parser->failed && parser->lexer.tok.type != TOK_ENDCASE) {
+    VlogIntExpr *label;
+    VlogGenerate *body;
+    char *block_name;
+
+    label = NULL;
+    body = NULL;
+    block_name = NULL;
+    if (parser->lexer.tok.type == TOK_EOF) {
+      parser_error(parser, "unexpected end of file inside generate case");
+      goto fail;
+    }
+
+    if (parser_accept(parser, TOK_DEFAULT)) {
+      if (!parser_expect(parser, ':', "':' after generate case default")) goto fail;
+      if (default_body != NULL) {
+        parser_error(parser, "duplicate default in generate case");
+        goto fail;
+      }
+      if (!parse_generate_body(parser, &default_name, &default_body)) goto fail;
+      continue;
+    }
+
+    label = parse_int_expr(parser);
+    if (label == NULL) goto fail;
+    if (!parser_expect(parser, ':', "':' after generate case label")) {
+      vlog_int_expr_free(label);
+      goto fail;
+    }
+    if (!parse_generate_body(parser, &block_name, &body)) {
+      vlog_int_expr_free(label);
+      free(block_name);
+      goto fail;
+    }
+    case_items = vlog_gen_case_item_append(case_items, label, block_name, body);
+    free(block_name);
+  }
+
+  if (!parser_expect(parser, TOK_ENDCASE, "'endcase' after generate case")) goto fail;
+  *items = vlog_generate_append_case(*items,
+                                     case_expr,
+                                     case_items,
+                                     default_name,
+                                     default_body,
+                                     line);
+  free(default_name);
+  return 1;
+
+fail:
+  vlog_int_expr_free(case_expr);
+  vlog_gen_case_item_free(case_items);
+  vlog_generate_free(default_body);
+  free(default_name);
+  return 0;
+}
+
 static int parse_generate_item(Parser *parser, VlogGenerate **items)
 {
   if (parser->lexer.tok.type == TOK_ASSIGN) {
@@ -2827,6 +2969,12 @@ static int parse_generate_item(Parser *parser, VlogGenerate **items)
   }
   if (parser->lexer.tok.type == TOK_FOR) {
     return parse_generate_for(parser, items);
+  }
+  if (parser->lexer.tok.type == TOK_IF) {
+    return parse_generate_if(parser, items);
+  }
+  if (parser->lexer.tok.type == TOK_CASE) {
+    return parse_generate_case(parser, items);
   }
   if (parser->lexer.tok.type == TOK_IDENT) {
     return parse_generate_instance(parser, items);
