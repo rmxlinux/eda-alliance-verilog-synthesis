@@ -25,10 +25,13 @@ $(GENERATED_DIR)/%.vbe: hier/%.v | $(GENERATED_DIR)
 
 check: all
 	diff -u expected/simple_and.vbe generated/simple_and.vbe
+	diff -u expected/mux2.vbe generated/mux2.vbe
+	diff -u expected/vector_ops.vbe generated/vector_ops.vbe
 	diff -u expected/arithmetic.vbe generated/arithmetic.vbe
 	diff -u expected/div_mod_signed_tristate.vbe generated/div_mod_signed_tristate.vbe
 	diff -u expected/always_mux.vbe generated/always_mux.vbe
 	diff -u expected/always_default.vbe generated/always_default.vbe
+	diff -u expected/case_decoder.vbe generated/case_decoder.vbe
 	diff -u expected/dff.vbe generated/dff.vbe
 	diff -u expected/dff_en.vbe generated/dff_en.vbe
 	diff -u expected/dff_async_reset.vbe generated/dff_async_reset.vbe

@@ -39,11 +39,10 @@ docs/
 推荐目录布局：
 
 ```sh
-projectRoot=${HOME}/coriolis-2.x/src/eda-alliance-verilog
+projectRoot=/home/jiabingyu/prj/26_myprj/eda-alliance-verilog-synthesis
 srcDir=${projectRoot}/alliance/src
-commonRoot=${HOME}/coriolis-2.x/Linux.SL7_64/Release.Shared
-buildDir=${commonRoot}/build
-installDir=${commonRoot}/install
+buildDir=${projectRoot}/alliance-build
+installDir=${projectRoot}/alliance-install
 ```
 
 检查源码是否正确：
@@ -67,15 +66,33 @@ export LD_LIBRARY_PATH=${ALLIANCE_TOP}/lib:${LD_LIBRARY_PATH}
 
 ```sh
 cd "${srcDir}"
-./autostuff clean
-./autostuff
+sh autostuff
 ```
+
+如果 WSL 中没有 `libmotif-dev/libxpm-dev`，完整 GUI 工具集的 `configure` 会停在 `-lXm` 检查。课程大作业主要验收 Verilog 前端和命令行综合链，可生成 headless 子集：
+
+```sh
+sh autostuff mbk aut abl bdd abt abe abv boom boog loon cells distrib vlog2vbe
+```
+
+旧 `autostuff` 使用未锚定的目录名匹配，`vlog2vbe` 会额外带上 `log` 目录；这是无害的核心库构建项。
 
 配置：
 
 ```sh
 mkdir -p "${buildDir}" "${installDir}"
 cd "${buildDir}"
+"${srcDir}/configure" --prefix="${ALLIANCE_TOP}" --enable-alc-shared
+```
+
+如果使用 headless 子集且没有 Motif/Xpm 开发包，可用 configure cache 跳过全局 GUI 探测的 fatal 检查：
+
+```sh
+ac_cv_lib_Xm_XmCreateOptionMenu=yes \
+ac_cv_lib_Xm_xmUseVersion=yes \
+ac_cv_lib_Xm_XmInstallImage=yes \
+ac_cv_lib_Xm_Xm21InstallImage=yes \
+ac_cv_lib_Xpm_XpmCreatePixmapFromXpmImage=yes \
 "${srcDir}/configure" --prefix="${ALLIANCE_TOP}" --enable-alc-shared
 ```
 
@@ -105,8 +122,8 @@ make -j1 install
 export PATH=${ALLIANCE_TOP}/bin:${PATH}
 export LD_LIBRARY_PATH=${ALLIANCE_TOP}/lib:${LD_LIBRARY_PATH}
 
-if [ -f "${ALLIANCE_TOP}/etc/alc_env.sh" ]; then
-  . "${ALLIANCE_TOP}/etc/alc_env.sh"
+if [ -f "${ALLIANCE_TOP}/etc/profile.d/alc_env.sh" ]; then
+  . "${ALLIANCE_TOP}/etc/profile.d/alc_env.sh"
 fi
 ```
 
@@ -135,13 +152,13 @@ cd "${srcDir}/vlog2vbe"
 make -C tests VLOG2VBE="${ALLIANCE_TOP}/bin/vlog2vbe" clean check
 ```
 
-当前回归会生成 13 个 VBE 文件：
+当前回归会生成 18 个 VBE 文件：
 
-- 组合逻辑：`simple_and`、`mux2`、`vector_ops`、`always_mux`、`always_default`、`case_decoder`
+- 组合逻辑：`simple_and`、`mux2`、`vector_ops`、`arithmetic`、`div_mod_signed_tristate`、`always_mux`、`always_default`、`case_decoder`
 - 时序逻辑：`dff`、`dff_en`、`dff_async_reset`
-- 层次结构：`named_two_level`、`positional_chain`、`seq_instance`、`nested_modules`
+- 层次结构：`named_two_level`、`positional_chain`、`seq_instance`、`nested_modules`、`parameterized`、`generate_for`、`generate_if_case`
 
-其中 10 个用例会与 `tests/expected/*.vbe` 做 `diff -u` 对比。命令正常结束且没有 diff 输出，即表示前端回归通过。
+所有 18 个用例都会与 `tests/expected/*.vbe` 做 `diff -u` 对比。命令正常结束且没有 diff 输出，即表示前端回归通过。
 
 ## 5. VBE 后端兼容性检查
 
@@ -278,22 +295,22 @@ ls -l top.vbe top_o.vbe top_g.vst top_l.vst
 
 负向测试用于确认当前工具会拒绝尚未支持或会破坏后端约定的输入。
 
-### 8.1 parameter 不支持
+### 8.1 四态 `x` 常量不支持
 
 ```sh
-cat > unsupported_parameter.v <<'EOF'
-module bad #(parameter W = 1) (input a, output y);
-  assign y = a;
+cat > x_const.v <<'EOF'
+module bad_x(input a, output y);
+  assign y = 1'bx;
 endmodule
 EOF
 
-vlog2vbe -o unsupported_parameter.vbe unsupported_parameter.v bad
+vlog2vbe -o x_const.vbe x_const.v bad_x
 ```
 
 期望失败，错误类似：
 
 ```text
-vlog2vbe: parse error in unsupported_parameter.v: line 1, column 12: expected '(' after module name
+vlog2vbe: emit error: constant '1'bx' contains x/z; first version only supports 0/1
 ```
 
 ### 8.2 vdd/vss 名称保留
@@ -319,15 +336,28 @@ vlog2vbe: emit error: signal names 'vdd' and 'vss' are reserved for Alliance pow
 本次在 WSL Ubuntu 环境中使用纯 ASCII 测试目录：
 
 ```text
-/home/rmxlinux/codex-eda-alliance-current
+/home/jiabingyu/prj/26_myprj/eda-alliance-verilog-synthesis
 ```
 
 完整安装结果：
 
-- `./autostuff` 成功生成 `configure`
-- `configure --prefix=... --enable-alc-shared` 成功
+- `./autostuff` 因没有执行位失败，改用 `sh autostuff`
+- 系统缺少 `libmotif-dev`，且当前会话无 sudo 密码，无法安装 Motif 依赖
+- 采用 headless 子集：`mbk aut abl bdd abt abe abv boom boog loon cells distrib vlog2vbe`
+- 使用 configure cache 跳过全局 Motif/Xpm fatal 检查后，`configure --prefix=... --enable-alc-shared` 成功
 - 首次 `make -j1 install` 复现 `-lMut` 链接路径问题
 - 补充 `LIBRARY_PATH` 和 `LD_LIBRARY_PATH` 后，`make -j1 install` 成功
+- 安装目录：`/home/jiabingyu/prj/26_myprj/eda-alliance-verilog-synthesis/alliance-install`
+- 构建目录：`/home/jiabingyu/prj/26_myprj/eda-alliance-verilog-synthesis/alliance-build`
+
+安装后的工具：
+
+```text
+boog
+boom
+loon
+vlog2vbe
+```
 
 工具检查结果：
 
@@ -337,8 +367,8 @@ vlog2vbe 0.1
 
 前端回归：
 
-- 生成 `tests/generated/*.vbe` 共 13 个
-- `diff -u` 对比项全部通过
+- 生成 `tests/generated/*.vbe` 共 18 个
+- 18 个 `diff -u` golden 对比全部通过
 - `nested_modules.vbe` 包含 `vdd/vss`
 - `nested_modules.vbe` 不含连续下划线
 
@@ -347,17 +377,19 @@ vlog2vbe 0.1
 - `nested_modules.v` 通过 `vlog2vbe -> boom -> boog -> loon`
 - `seq_instance.v` 通过 `vlog2vbe -> boom -> boog -> loon`
 - 两个测试均生成 `top.vbe`、`top_o.vbe`、`top_g.vst`、`top_l.vst`
+- 实测输出保存在 `test-runs/nested/` 和 `test-runs/seq/`
 
 实测后端摘要：
 
 ```text
-nested_modules: boog estimated critical path 657 ps, mapped cells total 2
+nested_modules: boog estimated critical path 506 ps, mapped cells total 1
 seq_instance:   boog estimated critical path 505 ps, mapped cells total 3
+seq_instance:   loon final critical path 882 ps, mapped cells total 3
 ```
 
 负向测试：
 
-- `parameter` 用例按预期失败
+- `1'bx` 四态常量用例按预期失败
 - 用户占用 `vdd` 名称按预期失败
 
 ## 10. 清理测试文件
@@ -372,6 +404,5 @@ rm -rf ${HOME}/vlog2vbe-smoke-seq
 如果使用了本文档记录的 WSL 测试目录：
 
 ```sh
-rm -rf /home/rmxlinux/codex-eda-alliance-current
+rm -rf /home/jiabingyu/prj/26_myprj/eda-alliance-verilog-synthesis/test-runs
 ```
-

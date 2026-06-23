@@ -8,6 +8,7 @@ config.log
 config.status
 configure
 libtool
+Makefile.in
 stamp-h*
 .deps/
 .libs/
@@ -19,10 +20,21 @@ stamp-h*
 *.dll
 *.dylib
 
+# Local Alliance build/install/test outputs.
+/alliance-build/
+/alliance-install/
+/test-runs/
+/alliance/src/configure.ac
+/alliance/src/compile
+/alliance/src/install-sh
+/alliance/src/missing
+/alliance/src/ltmain.sh
+/alliance/src/vlog2vbe/src/vlog2vbe
+/alliance/src/vlog2vbe/tests/generated/
+
 # Local editor and OS files.
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
 *~
-

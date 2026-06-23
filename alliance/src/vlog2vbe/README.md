@@ -30,6 +30,8 @@ loon simple_and_g simple_and_l
 - named and positional parameter overrides, such as `#(.W(4))` and `#(4)`;
 - static `generate for` loops with `genvar`, named blocks, continuous
   assignments, and module instances in the generated body;
+- static `generate if` and `generate case` blocks when the controlling
+  expression can be resolved from parameters;
 - hierarchy flattening into the selected top module before VBE emission, using
   BOOM-compatible flattened signal names;
 - automatic `vdd`/`vss` power ports and the matching Alliance power-supply
@@ -38,13 +40,14 @@ loon simple_and_g simple_and_l
   inference when exactly one module is not instantiated by another module;
 - identifiers, constants, bit-selects, part-selects, concatenation;
 - `~`, `!`, `&`, `|`, `^`, `&&`, `||`, `==`, `!=`, `?:`, and RTL
-  arithmetic `+`, `-`, `*`.
+  arithmetic `+`, `-`, `*`, `/`, `%`;
+- tri-state `z` on continuous assignments, lowered as wired-OR style enabled
+  drivers for the supported bus patterns.
 
-This version deliberately rejects generate-if/case blocks, delays,
-multiple asynchronous reset signals in one always block, four-state constants
-containing `x/z`, division/modulo in ordinary RTL expressions, and complex
-instance connections such as output ports connected to non-assignable expressions.
-Those are planned for later milestones.
+This version deliberately rejects delays, multiple asynchronous reset signals
+in one always block, four-state constants containing `x`, and complex instance
+connections such as output ports connected to non-assignable expressions. Those
+are planned for later milestones.
 
 ## Examples
 

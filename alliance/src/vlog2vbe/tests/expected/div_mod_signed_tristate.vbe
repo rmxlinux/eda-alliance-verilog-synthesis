@@ -1,0 +1,33 @@
+ENTITY div_mod_signed_tristate IS
+PORT(
+  a : in BIT_VECTOR(3 downto 0);
+  b : in BIT_VECTOR(3 downto 0);
+  en0 : in BIT;
+  en1 : in BIT;
+  sa : in BIT_VECTOR(2 downto 0);
+  sb : in BIT_VECTOR(2 downto 0);
+  quot : out BIT_VECTOR(3 downto 0);
+  rem : out BIT_VECTOR(3 downto 0);
+  ssum : out BIT_VECTOR(3 downto 0);
+  bus : out BIT_VECTOR(3 downto 0);
+  vdd : in BIT;
+  vss : in BIT
+);
+END div_mod_signed_tristate;
+
+ARCHITECTURE behavior_data_flow OF div_mod_signed_tristate IS
+BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on div_mod_signed_tristate"
+  SEVERITY WARNING;
+  quot <= (a / b);
+  rem <= (a mod b);
+  ssum(0) <= (sa(0) xor sb(0));
+  ssum(1) <= ((sa(1) xor sb(1)) xor (sa(0) and sb(0)));
+  ssum(2) <= ((sa(2) xor sb(2)) xor ((sa(1) and sb(1)) or (sa(1) and (sa(0) and sb(0))) or (sb(1) and (sa(0) and sb(0)))));
+  ssum(3) <= ((sa(2) xor sb(2)) xor ((sa(1) and sb(1)) or (sa(1) and (sa(0) and sb(0))) or (sb(1) and (sa(0) and sb(0)))));
+  bus(0) <= (en0 and a(0)) or (en1 and b(0));
+  bus(1) <= (en0 and a(1)) or (en1 and b(1));
+  bus(2) <= (en0 and a(2)) or (en1 and b(2));
+  bus(3) <= (en0 and a(3)) or (en1 and b(3));
+END behavior_data_flow;

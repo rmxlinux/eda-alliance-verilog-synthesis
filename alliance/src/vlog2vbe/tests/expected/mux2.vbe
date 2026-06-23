@@ -1,0 +1,18 @@
+ENTITY mux2 IS
+PORT(
+  sel : in BIT;
+  a : in BIT;
+  b : in BIT;
+  y : out BIT;
+  vdd : in BIT;
+  vss : in BIT
+);
+END mux2;
+
+ARCHITECTURE behavior_data_flow OF mux2 IS
+BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on mux2"
+  SEVERITY WARNING;
+  y <= ((sel and a) or ((not sel) and b));
+END behavior_data_flow;

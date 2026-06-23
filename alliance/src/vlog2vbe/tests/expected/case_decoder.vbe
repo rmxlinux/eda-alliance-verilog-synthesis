@@ -1,0 +1,19 @@
+ENTITY case_decoder IS
+PORT(
+  sel : in BIT_VECTOR(1 downto 0);
+  y : out BIT_VECTOR(3 downto 0);
+  vdd : in BIT;
+  vss : in BIT
+);
+END case_decoder;
+
+ARCHITECTURE behavior_data_flow OF case_decoder IS
+BEGIN
+  ASSERT ((vdd and not (vss)) = '1')
+  REPORT "power supply is missing on case_decoder"
+  SEVERITY WARNING;
+  y(0) <= (((not ((sel(0) xor '0') or (sel(1) xor '0'))) and '1') or ((not (not ((sel(0) xor '0') or (sel(1) xor '0')))) and (((not ((sel(0) xor '1') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '1') or (sel(1) xor '0')))) and (((not ((sel(0) xor '0') or (sel(1) xor '1'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '1')))) and '0'))))));
+  y(1) <= (((not ((sel(0) xor '0') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '0')))) and (((not ((sel(0) xor '1') or (sel(1) xor '0'))) and '1') or ((not (not ((sel(0) xor '1') or (sel(1) xor '0')))) and (((not ((sel(0) xor '0') or (sel(1) xor '1'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '1')))) and '0'))))));
+  y(2) <= (((not ((sel(0) xor '0') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '0')))) and (((not ((sel(0) xor '1') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '1') or (sel(1) xor '0')))) and (((not ((sel(0) xor '0') or (sel(1) xor '1'))) and '1') or ((not (not ((sel(0) xor '0') or (sel(1) xor '1')))) and '0'))))));
+  y(3) <= (((not ((sel(0) xor '0') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '0')))) and (((not ((sel(0) xor '1') or (sel(1) xor '0'))) and '0') or ((not (not ((sel(0) xor '1') or (sel(1) xor '0')))) and (((not ((sel(0) xor '0') or (sel(1) xor '1'))) and '0') or ((not (not ((sel(0) xor '0') or (sel(1) xor '1')))) and '1'))))));
+END behavior_data_flow;
